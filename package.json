@@ -1,14 +1,22 @@
 {
-  "name": "should-be",
-  "type": "module",
-  "version": "0.0.1",
-  "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
-    "preview": "astro preview",
-    "astro": "astro"
-  },
-  "dependencies": {
-    "astro": "^5.14.8"
-  }
+	"name": "should-be",
+	"type": "module",
+	"version": "0.0.1",
+	"scripts": {
+		"dev": "astro dev",
+		"build": "astro build",
+		"preview": "astro preview",
+		"astro": "astro"
+	},
+	"dependencies": {
+		"@astrojs/solid-js": "^5.1.1",
+		"@tailwindcss/vite": "^4.1.15",
+		"astro": "^5.14.8",
+		"flowbite": "^3.1.2",
+		"solid-js": "^1.9.9",
+		"tailwindcss": "^4.1.15"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.2.7"
+	}
 }

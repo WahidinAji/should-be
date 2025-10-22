@@ -44,3 +44,25 @@ All commands are run from the root of the project, from a terminal:
 ## 👀 Want to learn more?
 
 Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+
+
+## BiomeJS 
+```sh
+# Format all files
+pnpm exec biome format --write
+
+# Format specific files
+pnpm exec biome format --write <files>
+
+# Lint and apply safe fixes to all files
+pnpm exec biome lint --write
+
+# Lint files and apply safe fixes to specific files
+pnpm exec biome lint --write <files>
+
+# Format, lint, and organize imports of all files
+pnpm exec biome check --write
+
+# Format, lint, and organize imports of specific files
+pnpm exec biome check --write <files>
+```
