@@ -5,13 +5,19 @@ import tailwindcss from "@tailwindcss/vite";
 
 import mdx from "@astrojs/mdx";
 
+import cloudflare from "@astrojs/cloudflare";
+
 // https://astro.build/config
 export default defineConfig({
-    integrations: [solidJs(), mdx()],
-    redirects: {
-        "/contents": "/",
-    },
-    vite: {
-        plugins: [tailwindcss()],
-    }
+  integrations: [solidJs(), mdx()],
+
+  redirects: {
+      "/contents": "/",
+  },
+
+  vite: {
+      plugins: [tailwindcss()],
+  },
+
+  adapter: cloudflare()
 });
