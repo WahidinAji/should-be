@@ -1,19 +1,56 @@
-<header class="flex text-center">
-	<!-- <nav class="flex fixed w-screen text-center py-2">
-        <div class="flex justify-center m-auto gap-10 border-1 rounded-lg shadow-stone-200 shadow-lg border-red-500 w-1/2 bg-amber-100 py-4">
-            <a class="mx-2">LINK ONE</a>
-        </div>
-    </nav> -->
-	<!-- <nav class="flex justify-center m-auto gap-10 border-1 rounded-lg shadow-stone-200 shadow-lg border-red-500 w-1/2 bg-amber-100 py-4">
-        <a class="mx-2">LINK ONE</a>
-    </nav> -->
+---
+const baseUrl = import.meta.env.BASE_URL || "/";
+const basePrefix =
+	baseUrl === "/" ? "" : baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
 
+const rawPath = Astro.url.pathname;
+let relativePath = rawPath;
+
+if (basePrefix && rawPath.startsWith(basePrefix)) {
+	relativePath = rawPath.slice(basePrefix.length) || "/";
+}
+
+relativePath = relativePath.replace(/\/+$/, "") || "/";
+const segments = relativePath === "/" ? [] : relativePath.slice(1).split("/");
+const topLevel = segments[0] ? `/${segments[0]}` : "/";
+
+const navLinks = [
+	// { href: "/", label: "Home" },
+	// { href: "#", label: "About" },
+	{ href: "/contents", label: "My Thoughts" },
+	// { href: "#", label: "Contact" },
+];
+
+const baseLinkClass =
+	"block py-2 px-3 text-gray-900 rounded-sm hover:bg-gray-100 md:hover:bg-transparent md:hover:text-blue-700 md:p-0 md:dark:hover:text-blue-500 dark:text-white dark:hover:bg-gray-700 dark:hover:text-white md:dark:hover:bg-transparent dark:border-gray-700";
+const activeLinkClass =
+	"block py-2 px-3 text-white bg-blue-700 rounded-sm md:bg-transparent md:text-blue-700 md:p-0 md:dark:text-blue-500";
+
+const normalizeHref = (href: string) =>
+	href === "#" ? "#" : href.replace(/\/+$/, "") || "/";
+
+const isActive = (href: string) => {
+	const normalizedHref = normalizeHref(href);
+	if (!normalizedHref || normalizedHref === "#") {
+		return false;
+	}
+
+	if (normalizedHref === "/") {
+		return relativePath === "/";
+	}
+
+	return relativePath === normalizedHref || topLevel === normalizedHref;
+};
+
+const getLinkClass = (href: string) =>
+	isActive(href) ? activeLinkClass : baseLinkClass;
+---
+
+<header class="flex text-center">
 	<nav
 		class="bg-white dark:bg-gray-900 fixed w-full text z-20 top-0 start-0 border-b border-gray-200 dark:border-gray-600"
 	>
-		<div
-			class="max-w-7xl flex flex-wrap items-center justify-center mx-auto p-4"
-		>
+		<div class="max-w-7xl flex flex-wrap items-center justify-center mx-auto p-4">
 			<div
 				class="items-center justify-between hidden w-full md:flex md:w-auto md:order-1"
 				id="navbar-sticky"
@@ -21,34 +58,18 @@
 				<ul
 					class="flex flex-col p-4 md:p-0 mt-4 font-medium border border-gray-100 rounded-lg bg-gray-50 md:space-x-8 rtl:space-x-reverse md:flex-row md:mt-0 md:border-0 md:bg-white dark:bg-gray-800 md:dark:bg-gray-900 dark:border-gray-700"
 				>
-					<li>
-						<a
-							href="#"
-							class="block py-2 px-3 text-white bg-blue-700 rounded-sm md:bg-transparent md:text-blue-700 md:p-0 md:dark:text-blue-500"
-							aria-current="page">Home</a
-						>
-					</li>
-					<li>
-						<a
-							href="#"
-							class="block py-2 px-3 text-gray-900 rounded-sm hover:bg-gray-100 md:hover:bg-transparent md:hover:text-blue-700 md:p-0 md:dark:hover:text-blue-500 dark:text-white dark:hover:bg-gray-700 dark:hover:text-white md:dark:hover:bg-transparent dark:border-gray-700"
-							>About</a
-						>
-					</li>
-					<li>
-						<a
-							href="#"
-							class="block py-2 px-3 text-gray-900 rounded-sm hover:bg-gray-100 md:hover:bg-transparent md:hover:text-blue-700 md:p-0 md:dark:hover:text-blue-500 dark:text-white dark:hover:bg-gray-700 dark:hover:text-white md:dark:hover:bg-transparent dark:border-gray-700"
-							>Services</a
-						>
-					</li>
-					<li>
-						<a
-							href="#"
-							class="block py-2 px-3 text-gray-900 rounded-sm hover:bg-gray-100 md:hover:bg-transparent md:hover:text-blue-700 md:p-0 md:dark:hover:text-blue-500 dark:text-white dark:hover:bg-gray-700 dark:hover:text-white md:dark:hover:bg-transparent dark:border-gray-700"
-							>Contact</a
-						>
-					</li>
+				<!-- class={getLinkClass(link.href)} -->
+					{navLinks.map((link) => (
+						<li>
+							<a
+								href={link.href}
+								class={baseLinkClass}
+								aria-current={isActive(link.href) ? "page" : undefined}
+							>
+								{link.label}
+							</a>
+						</li>
+					))}
 				</ul>
 			</div>
 		</div>
