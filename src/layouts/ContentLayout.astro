@@ -2,17 +2,10 @@
 import Layout from "./Layout.astro";
 
 const { frontmatter } = Astro.props;
-
-// const arrowBack = "https://cdn-icons-png.flaticon.com/512/1077/1077114.png";
-const arrowBack = "/images/arrow-back.svg";
 ---
 
-<Layout>
+<Layout title={frontmatter.title}>
   <main class="mt-20 min-h-screen w-full flex flex-col items-center">
-    <!-- Back button -->
-
-    <!-- <button>
-      </button> -->
     <section class="w-full max-w-5xl">
       <a href="/" class="flex justify-start hover:text-amber-500">
         back
