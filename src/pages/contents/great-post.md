@@ -1,7 +1,7 @@
 ---
 layout: ../../layouts/ContentLayout.astro
 title: My page of content
-thumbnail: ../../../../public/images/image.png
+thumbnail: /images/image.png
 description: This is My Page of content about this
 date: 2025-01-01
 ---

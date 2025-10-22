@@ -1,7 +1,7 @@
 ---
 layout: ../../layouts/ContentLayout.astro
 title: Another content
-thumbnail: ../../../../public/images/image.png
+thumbnail: /images/image.png
 description: This is another content
 date: 2022-01-01
 ---
