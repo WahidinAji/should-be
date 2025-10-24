@@ -1,434 +1,628 @@
 ---
 import Layout from "../layouts/Layout.astro";
-
-type PostFrontmatter = {
-    title: string;
-    description: string;
-    date: string;
-    thumbnail?: string;
-    layout?: string;
-};
+import {
+	languages,
+	defaultLanguage,
+	baseLanguageButtonClass,
+	activeLanguageButtonClass,
+	inactiveLanguageButtonClass,
+	extractPostMetadata,
+	buildLocalizedPostTexts,
+	type LanguageCode,
+	type PostFrontmatter,
+} from "../common";
 import type { MarkdownInstance } from "astro";
+
 const postModules = import.meta.glob<MarkdownInstance<PostFrontmatter>>(
-    "./contents/*.md",
-    { eager: true },
+	"./contents/*.md",
+	{ eager: true },
 );
 const posts = Object.values(postModules);
 
-const fallbackThumbnail = "../../../public/images/image.png";
-const thumbnailFor = (thumbnail?: string) =>
-    thumbnail && thumbnail.trim().length > 0 ? thumbnail : fallbackThumbnail;
-
-const parseDate = (value?: string) => {
-    if (!value) {
-        return null;
-    }
-
-    const parsed = new Date(value);
-    return Number.isNaN(parsed.valueOf()) ? null : parsed;
-};
+const uiCopy = {
+	searchPlaceholder: { id: "Cari tulisan…", en: "Search thoughts…" },
+	filterLabel: { id: "Filter berdasarkan tahun", en: "Filter by year" },
+	allYears: { id: "Semua tahun", en: "All years" },
+	emptyNoPosts: {
+		id: "Belum ada tulisan untuk ditampilkan.",
+		en: "No posts yet.",
+	},
+	emptyNoResults: {
+		id: "Tidak ada tulisan yang cocok dengan pencarian.",
+		en: "No posts match your search.",
+	},
+	readMore: { id: "Baca selengkapnya", en: "Read more" },
+	paginationPrevious: { id: "Sebelumnya", en: "Previous" },
+	paginationNext: { id: "Berikutnya", en: "Next" },
+	paginationStatus: {
+		id: "Menampilkan {start}–{end} dari {total}",
+		en: "Showing {start}-{end} of {total}",
+	},
+	languageToggleLabel: { id: "Bahasa", en: "Language" },
+} as const satisfies Record<string, Record<LanguageCode, string>>;
 
 const normalizedPosts = posts
-    .map((post) => {
-        const dateObject = parseDate(post.frontmatter.date);
+	.map((post) => {
+		const metadata = extractPostMetadata(post.frontmatter);
+		const texts = buildLocalizedPostTexts(post.frontmatter);
 
-        return {
-            title: post.frontmatter.title ?? "Untitled",
-            description: post.frontmatter.description ?? "",
-            date: post.frontmatter.date ?? "",
-            year: dateObject ? String(dateObject.getFullYear()) : "Unknown",
-            thumbnail: thumbnailFor(post.frontmatter.thumbnail),
-            url: post.url,
-            sortValue: dateObject ? dateObject.valueOf() : 0,
-        };
-    })
-    .sort((a, b) => b.sortValue - a.sortValue)
-    .map(({ sortValue, ...rest }) => rest);
+		return {
+			url: post.url,
+			year: metadata.year,
+			thumbnail: metadata.thumbnail,
+			texts,
+			sortValue: metadata.sortValue,
+		};
+	})
+	.sort((a, b) => b.sortValue - a.sortValue)
+	.map(({ sortValue, ...rest }) => rest);
 
 const uniqueYears = Array.from(
-    new Set(normalizedPosts.map((post) => post.year)),
+	new Set(normalizedPosts.map((post) => post.year)),
 );
 const chronologicalYears = uniqueYears
-    .filter((year) => year !== "Unknown")
-    .sort((a, b) => Number(b) - Number(a));
+	.filter((year) => year !== "Unknown")
+	.sort((a, b) => Number(b) - Number(a));
 if (uniqueYears.includes("Unknown")) {
-    chronologicalYears.push("Unknown");
+	chronologicalYears.push("Unknown");
 }
 
 const PAGINATION_THRESHOLD = 25;
 const PAGE_SIZE = 6;
 const shouldPaginate = normalizedPosts.length > PAGINATION_THRESHOLD;
 const resolvedPageSize =
-    normalizedPosts.length === 0
-        ? PAGE_SIZE
-        : shouldPaginate
-          ? PAGE_SIZE
-          : normalizedPosts.length;
+	normalizedPosts.length === 0
+		? PAGE_SIZE
+		: shouldPaginate
+			? PAGE_SIZE
+			: normalizedPosts.length;
 const initialPosts = normalizedPosts.slice(0, resolvedPageSize);
+
+const languagesJson = JSON.stringify(languages).replace(/</g, "\\u003c");
+const copyJson = JSON.stringify(uiCopy).replace(/</g, "\\u003c");
 const postsJson = JSON.stringify(normalizedPosts).replace(/</g, "\\u003c");
+
+const localizedCopy = (
+	key: keyof typeof uiCopy,
+	lang: LanguageCode = defaultLanguage,
+) => {
+	const entry = uiCopy[key];
+	if (!entry) return "";
+	return entry[lang] ?? entry[defaultLanguage] ?? Object.values(entry)[0] ?? "";
+};
+
+const textFor = (
+	post: (typeof normalizedPosts)[number],
+	lang: LanguageCode = defaultLanguage,
+) =>
+	post.texts[lang] ??
+	post.texts[defaultLanguage] ??
+	Object.values(post.texts)[0];
 ---
 
 <Layout title="Hi">
-    <main class="pt-32 pb-24 bg-slate-50 min-h-screen">
-        <section class="mx-auto flex w-full max-w-6xl flex-col px-6">
-            <header class="text-center">
-                <h1 class="text-3xl font-semibold text-gray-800">
-                    Hi there! I hope you are doing well and please enjoy the contents.
-                </h1>
-            </header>
+	<main class="pt-32 pb-24 bg-slate-50 min-h-screen">
+		<section class="mx-auto flex w-full max-w-6xl flex-col px-6">
+			<header class="text-center">
+				<h1 class="text-3xl font-semibold text-gray-800">Hi there! I hope you are doing well and please enjoy the contents.</h1>
+			</header>
 
-            <div
-                class="mt-10 flex flex-col gap-4 sm:mt-12 sm:flex-row sm:items-center sm:justify-between"
-            >
-                <label class="w-full sm:max-w-xs">
-                    <span class="sr-only">Search posts</span>
-                    <input
-                        id="posts-search"
-                        type="search"
-                        placeholder="Search thoughts…"
-                        class="w-full rounded-full border border-gray-200 bg-white px-5 py-3 text-sm text-gray-700 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                    />
-                </label>
-                <div
-                    class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3"
-                >
-                    <label
-                        for="posts-filter"
-                        class="text-sm font-medium text-gray-600 sm:whitespace-nowrap"
-                    >
-                        Filter by year
-                    </label>
-                    <select
-                        id="posts-filter"
-                        class="w-full rounded-full border border-gray-200 bg-white px-4 py-3 text-sm text-gray-700 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200 sm:w-40"
-                    >
-                        <option value="">All years</option>
-                        {
-                            chronologicalYears.map((year) => (
-                                <option value={year}>{year}</option>
-                            ))
-                        }
-                    </select>
-                </div>
-            </div>
+			<div class="mt-10 flex flex-col gap-5 sm:mt-12 md:flex-row md:items-center md:justify-between">
+				<div class="flex w-full flex-col gap-3 md:max-w-xl md:flex-row md:items-center">
+					<label class="w-full md:max-w-xs">
+						<span class="sr-only">{localizedCopy("searchPlaceholder")}</span>
+						<input
+							id="posts-search"
+							type="search"
+							placeholder={localizedCopy("searchPlaceholder")}
+							class="w-full rounded-full border border-gray-200 bg-white px-5 py-3 text-sm text-gray-700 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+						/>
+					</label>
+					<div class="flex w-full flex-col gap-2 md:w-auto md:flex-row md:items-center md:gap-3">
+						<label
+							for="posts-filter"
+							class="text-sm font-medium text-gray-600 md:whitespace-nowrap"
+							data-i18n-filter-label
+						>
+							{localizedCopy("filterLabel")}
+						</label>
+						<select
+							id="posts-filter"
+							class="w-full rounded-full border border-gray-200 bg-white px-4 py-3 text-sm text-gray-700 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200 md:w-40"
+						>
+							<option value="" data-i18n-all-years>{localizedCopy("allYears")}</option>
+							{
+								chronologicalYears.map((year) => (
+									<option value={year}>{year}</option>
+								))
+							}
+						</select>
+					</div>
+				</div>
+				<div class="flex flex-col items-start gap-1 md:items-end">
+					<span class="text-xs uppercase tracking-wide text-gray-400" data-i18n-language-label>
+						{localizedCopy("languageToggleLabel")}
+					</span>
+					<div
+						id="language-toggle"
+						class="inline-flex items-center gap-2 rounded-full bg-gray-100 p-1 md:bg-transparent"
+						data-default-language={defaultLanguage}
+						data-active-class={activeLanguageButtonClass}
+						data-inactive-class={inactiveLanguageButtonClass}
+					>
+						{
+							languages.map((lang) => {
+								const isActive = lang.code === defaultLanguage;
+								return (
+									<button
+										type="button"
+										data-lang={lang.code}
+										data-base-class={baseLanguageButtonClass}
+										class={`${baseLanguageButtonClass} ${
+											isActive
+												? activeLanguageButtonClass
+												: inactiveLanguageButtonClass
+										}`}
+										aria-pressed={isActive}
+									>
+										{lang.label}
+									</button>
+								);
+							})
+						}
+					</div>
+				</div>
+			</div>
 
-            <div
-                id="posts-grid"
-                class="mt-14 grid gap-8 sm:grid-cols-2 xl:grid-cols-3"
-                data-page-size={resolvedPageSize}
-                data-should-paginate={shouldPaginate}
-            >
-                {
-                    initialPosts.length > 0 ? (
-                        initialPosts.map((post) => (
-                            <article class="flex h-full flex-col rounded-3xl border border-gray-200 bg-white shadow-[0px_10px_35px_rgba(15,23,42,0.08)] transition duration-200 hover:-translate-y-1 hover:shadow-[0px_18px_45px_rgba(15,23,42,0.12)]">
-                                <a href={post.url} class="overflow-hidden">
-                                    <img
-                                        class="h-48 w-full object-cover"
-                                        src={post.thumbnail}
-                                        alt={post.title}
-                                        loading="lazy"
-                                    />
-                                </a>
-                                <div class="flex flex-1 flex-col px-7 py-6">
-                                    <a href={post.url}>
-                                        <h2 class="text-xl font-semibold text-gray-900">
-                                            {post.title}
-                                        </h2>
-                                    </a>
-                                    <p class="mt-3 flex-1 text-sm leading-relaxed text-gray-600">
-                                        {post.description}
-                                    </p>
-                                    <a
-                                        href={post.url}
-                                        class="mt-6 inline-flex w-fit items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
-                                    >
-                                        Read more
-                                        <svg
-                                            class="h-4 w-4"
-                                            aria-hidden="true"
-                                            xmlns="http://www.w3.org/2000/svg"
-                                            fill="none"
-                                            viewBox="0 0 16 10"
-                                        >
-                                            <path
-                                                stroke="currentColor"
-                                                stroke-linecap="round"
-                                                stroke-linejoin="round"
-                                                stroke-width="2"
-                                                d="M1 5h14m0 0L11 1m4 4L11 9"
-                                            />
-                                        </svg>
-                                    </a>
-                                </div>
-                            </article>
-                        ))
-                    ) : (
-                        <div class="rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center text-sm text-gray-500 sm:col-span-2 xl:col-span-3">
-                            Belum ada tulisan untuk ditampilkan.
-                        </div>
-                    )
-                }
-            </div>
+			<div
+				id="posts-grid"
+				class="mt-14 grid gap-8 sm:grid-cols-2 xl:grid-cols-3"
+				data-page-size={resolvedPageSize}
+				data-should-paginate={shouldPaginate}
+			>
+				{
+					initialPosts.length > 0 ? (
+						initialPosts.map((post) => {
+							const text = textFor(post);
+							return (
+								<article class="flex h-full flex-col rounded-3xl border border-gray-200 bg-white shadow-[0px_10px_35px_rgba(15,23,42,0.08)] transition duration-200 hover:-translate-y-1 hover:shadow-[0px_18px_45px_rgba(15,23,42,0.12)]">
+									<a href={post.url} class="overflow-hidden">
+										<img
+											class="h-48 w-full object-cover"
+											src={post.thumbnail}
+											alt={text.title}
+											loading="lazy"
+										/>
+									</a>
+									<div class="flex flex-1 flex-col px-7 py-6" data-card-lang>
+										<a href={post.url}>
+											<h2 class="text-xl font-semibold text-gray-900" data-card-title>
+												{text.title}
+											</h2>
+										</a>
+										<p class="mt-3 flex-1 text-sm leading-relaxed text-gray-600" data-card-description>
+											{text.description}
+										</p>
+								<a
+									href={post.url}
+									class="mt-6 inline-flex w-fit items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
+									data-card-cta
+								>
+									<span data-card-cta-text>{localizedCopy("readMore")}</span>
+									<svg
+										class="h-4 w-4"
+										aria-hidden="true"
+										xmlns="http://www.w3.org/2000/svg"
+										fill="none"
+												viewBox="0 0 16 10"
+											>
+												<path
+													stroke="currentColor"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													stroke-width="2"
+													d="M1 5h14m0 0L11 1m4 4L11 9"
+												/>
+											</svg>
+										</a>
+									</div>
+								</article>
+							);
+						})
+					) : (
+						<div class="rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center text-sm text-gray-500 sm:col-span-2 xl:col-span-3" data-empty-state>
+							{localizedCopy("emptyNoPosts")}
+						</div>
+					)
+				}
+			</div>
 
-            <div
-                id="posts-pagination"
-                class="mt-16 flex flex-col items-center justify-between gap-4 sm:flex-row"
-                {...shouldPaginate ? {} : { hidden: true }}
-            >
-                <div class="flex items-center gap-3">
-                    <button
-                        id="pagination-prev"
-                        type="button"
-                        class="inline-flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 transition hover:border-blue-500 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400"
-                    >
-                        <svg
-                            class="h-4 w-4"
-                            xmlns="http://www.w3.org/2000/svg"
-                            fill="none"
-                            viewBox="0 0 12 10"
-                            aria-hidden="true"
-                        >
-                            <path
-                                d="M11 5H1m0 0 3-3m-3 3 3 3"
-                                stroke="currentColor"
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2"></path>
-                        </svg>
-                        Previous
-                    </button>
-                    <button
-                        id="pagination-next"
-                        type="button"
-                        class="inline-flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 transition hover:border-blue-500 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400"
-                    >
-                        Next
-                        <svg
-                            class="h-4 w-4"
-                            xmlns="http://www.w3.org/2000/svg"
-                            fill="none"
-                            viewBox="0 0 12 10"
-                            aria-hidden="true"
-                        >
-                            <path
-                                d="M1 5h10m0 0-3-3m3 3-3 3"
-                                stroke="currentColor"
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2"></path>
-                        </svg>
-                    </button>
-                </div>
-                <p
-                    id="pagination-status"
-                    class="text-sm text-gray-500"
-                    aria-live="polite"
-                >
-                </p>
-            </div>
+			<div
+				id="posts-pagination"
+				class="mt-16 flex flex-col items-center justify-between gap-4 sm:flex-row"
+				{...(shouldPaginate ? {} : { hidden: true })}
+			>
+				<div class="flex items-center gap-3">
+					<button
+						id="pagination-prev"
+						type="button"
+						class="inline-flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 transition hover:border-blue-500 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400"
+					>
+						<svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 12 10" aria-hidden="true">
+							<path d="M11 5H1m0 0 3-3m-3 3 3 3" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" />
+						</svg>
+						<span data-i18n-pagination-prev>{localizedCopy("paginationPrevious")}</span>
+					</button>
+					<button
+						id="pagination-next"
+						type="button"
+						class="inline-flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 transition hover:border-blue-500 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400"
+					>
+						<span data-i18n-pagination-next>{localizedCopy("paginationNext")}</span>
+						<svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 12 10" aria-hidden="true">
+							<path d="M1 5h10m0 0-3-3m3 3-3 3" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" />
+						</svg>
+					</button>
+				</div>
+				<p id="pagination-status" class="text-sm text-gray-500" aria-live="polite"></p>
+			</div>
 
-            <noscript>
-                <p
-                    class="mt-8 rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-4 text-center text-sm text-gray-500"
-                >
-                    Aktifkan JavaScript untuk mencari, memfilter, dan menelusuri
-                    tulisan lainnya.
-                </p>
-            </noscript>
-        </section>
+			<noscript>
+				<p class="mt-8 rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-4 text-center text-sm text-gray-500">
+					Aktifkan JavaScript untuk mencari, memfilter, dan menelusuri tulisan dalam bahasa lainnya.
+				</p>
+			</noscript>
+		</section>
 
-        <script id="posts-data" type="application/json" set:html={postsJson} />
-        <script is:inline>
-            const stateElement = document.querySelector("#posts-data");
-            const grid = document.querySelector("#posts-grid");
-            const searchInput = document.querySelector("#posts-search");
-            const filterSelect = document.querySelector("#posts-filter");
-            const paginationWrapper =
-                document.querySelector("#posts-pagination");
-            const prevButton = document.querySelector("#pagination-prev");
-            const nextButton = document.querySelector("#pagination-next");
-            const statusLabel = document.querySelector("#pagination-status");
+		<script id="posts-languages" type="application/json" set:html={languagesJson}></script>
+		<script id="posts-copy" type="application/json" set:html={copyJson}></script>
+		<script id="posts-data" type="application/json" set:html={postsJson}></script>
+		<script is:inline>
+			const stateElement = document.querySelector("#posts-data");
+			const languagesElement = document.querySelector("#posts-languages");
+			const copyElement = document.querySelector("#posts-copy");
+			const grid = document.querySelector("#posts-grid");
+			const searchInput = document.querySelector("#posts-search");
+			const filterSelect = document.querySelector("#posts-filter");
+			const paginationWrapper = document.querySelector("#posts-pagination");
+			const prevButton = document.querySelector("#pagination-prev");
+			const nextButton = document.querySelector("#pagination-next");
+			const statusLabel = document.querySelector("#pagination-status");
+			const languageToggle = document.querySelector("#language-toggle");
 
-            if (
-                stateElement &&
-                grid &&
-                searchInput &&
-                filterSelect &&
-                paginationWrapper &&
-                prevButton &&
-                nextButton &&
-                statusLabel
-            ) {
-                let posts = [];
-                try {
-                    posts = JSON.parse(stateElement.textContent || "[]");
-                } catch (error) {
-                    console.error("Failed to parse posts data", error);
-                    posts = [];
-                }
-                const shouldPaginate = grid.dataset.shouldPaginate === "true";
-                const basePageSize = parseInt(grid.dataset.pageSize || "", 10);
-                const fallbackPageSize =
-                    Number.isFinite(basePageSize) && basePageSize > 0
-                        ? basePageSize
-                        : 1;
-                const pageSize = shouldPaginate
-                    ? fallbackPageSize
-                    : posts.length || fallbackPageSize;
+			if (
+				stateElement &&
+				languagesElement &&
+				copyElement &&
+				grid &&
+				searchInput &&
+				filterSelect &&
+				paginationWrapper &&
+				prevButton &&
+				nextButton &&
+				statusLabel &&
+				languageToggle
+			) {
+				let posts = [];
+				let languages = [];
+				let copy = {};
+				try {
+					posts = JSON.parse(stateElement.textContent || "[]");
+				} catch (error) {
+					console.error("Failed to parse posts data", error);
+				}
 
-                const escapeHtml = (value) =>
-                    String(value ?? "").replace(/[&<>"']/g, (char) => {
-                        switch (char) {
-                            case "&":
-                                return "&amp;";
-                            case "<":
-                                return "&lt;";
-                            case ">":
-                                return "&gt;";
-                            case '"':
-                                return "&quot;";
-                            case "'":
-                                return "&#039;";
-                            default:
-                                return char;
-                        }
-                    });
+				try {
+					languages = JSON.parse(languagesElement.textContent || "[]");
+				} catch (error) {
+					console.error("Failed to parse language data", error);
+				}
 
-                const renderCard = (post) => `
+				try {
+					copy = JSON.parse(copyElement.textContent || "{}");
+				} catch (error) {
+					console.error("Failed to parse copy data", error);
+				}
+
+				const basePageSize = parseInt(grid.dataset.pageSize || "", 10);
+				const shouldPaginate = grid.dataset.shouldPaginate === "true";
+				const fallbackPageSize = Number.isFinite(basePageSize) && basePageSize > 0 ? basePageSize : 1;
+				const pageSize = shouldPaginate ? fallbackPageSize : posts.length || fallbackPageSize;
+
+				const storageKey = "preferred-language";
+				const defaultLanguage = languageToggle.dataset.defaultLanguage || languages[0]?.code || "id";
+				const detectPreferredLanguage = () => {
+					if (typeof navigator === "undefined") {
+						return null;
+					}
+
+					const available = languages.map((lang) => lang.code.toLowerCase());
+					const candidates = Array.isArray(navigator.languages) && navigator.languages.length
+						? navigator.languages
+						: [navigator.language];
+
+					for (const candidate of candidates) {
+						if (!candidate) continue;
+						const normalized = candidate.toLowerCase();
+						const exact = available.find((code) => normalized === code);
+						if (exact) {
+							return exact;
+						}
+						const partial = available.find((code) => normalized.startsWith(`${code}-`));
+						if (partial) {
+							return partial;
+						}
+					}
+
+					return null;
+				};
+
+				let activeLanguage = defaultLanguage;
+				if (typeof window !== "undefined") {
+					try {
+						const stored = window.localStorage?.getItem(storageKey);
+						if (stored && languages.some((lang) => lang.code === stored)) {
+							activeLanguage = stored;
+						} else {
+							const detected = detectPreferredLanguage();
+							if (detected && languages.some((lang) => lang.code === detected)) {
+								activeLanguage = detected;
+							}
+						}
+					} catch (error) {
+						console.warn("Unable to read stored language", error);
+					}
+				}
+
+				const fallbackLanguage =
+					languages.find((lang) => lang.code === defaultLanguage)?.code || languages[0]?.code || "id";
+				const baseButtonClass = languageToggle.dataset.baseClass || "";
+				const activeButtonClass = languageToggle.dataset.activeClass || "";
+				const inactiveButtonClass = languageToggle.dataset.inactiveClass || "";
+
+				const escapeHtml = (value) =>
+					String(value ?? "").replace(/[&<>"']/g, (char) => {
+						switch (char) {
+							case "&":
+								return "&amp;";
+							case "<":
+								return "&lt;";
+							case ">":
+								return "&gt;";
+							case '"':
+								return "&quot;";
+							case "'":
+								return "&#039;";
+							default:
+								return char;
+						}
+					});
+
+				const translate = (key, replacements = {}) => {
+					const entry = copy?.[key] ?? {};
+					const template =
+						entry?.[activeLanguage] ??
+						entry?.[fallbackLanguage] ??
+						Object.values(entry)[0] ??
+						"";
+					return template.replace(/\{(\w+)\}/g, (match, token) => {
+						const value = replacements[token];
+						return value !== undefined ? String(value) : match;
+					});
+				};
+
+				const textFor = (post) => {
+					const texts = post?.texts ?? {};
+					return (
+						texts[activeLanguage] ??
+						texts[fallbackLanguage] ??
+						Object.values(texts)[0] ?? { title: "", description: "" }
+					);
+				};
+
+				const renderCard = (post) => {
+					const text = textFor(post);
+					return `
 					<article class="flex h-full flex-col rounded-3xl border border-gray-200 bg-white shadow-[0px_10px_35px_rgba(15,23,42,0.08)] transition duration-200 hover:-translate-y-1 hover:shadow-[0px_18px_45px_rgba(15,23,42,0.12)]">
 						<a href="${escapeHtml(post.url)}" class="overflow-hidden">
 							<img
 								class="h-48 w-full object-cover"
 								src="${escapeHtml(post.thumbnail)}"
-								alt="${escapeHtml(post.title)}"
-								loading="lazy"
-							/>
-						</a>
-						<div class="flex flex-1 flex-col px-7 py-6">
-							<a href="${escapeHtml(post.url)}">
-								<h2 class="text-xl font-semibold text-gray-900">${escapeHtml(post.title)}</h2>
+								alt="${escapeHtml(text.title)}"
+									loading="lazy"
+								/>
 							</a>
-							<p class="mt-3 flex-1 text-sm leading-relaxed text-gray-600">${escapeHtml(post.description)}</p>
-							<a
-								href="${escapeHtml(post.url)}"
-								class="mt-6 inline-flex w-fit items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
-								aria-label="Read more about ${escapeHtml(post.title)}"
-							>
-								Read more
-								<svg class="h-4 w-4" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 16 10">
-									<path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M1 5h14m0 0L11 1m4 4L11 9" />
-								</svg>
-							</a>
-						</div>
-					</article>
-				`;
+							<div class="flex flex-1 flex-col px-7 py-6" data-card-lang>
+								<a href="${escapeHtml(post.url)}">
+									<h2 class="text-xl font-semibold text-gray-900" data-card-title>${escapeHtml(text.title)}</h2>
+								</a>
+								<p class="mt-3 flex-1 text-sm leading-relaxed text-gray-600" data-card-description>${escapeHtml(text.description)}</p>
+								<a
+									href="${escapeHtml(post.url)}"
+									class="mt-6 inline-flex w-fit items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
+									data-card-cta
+									aria-label="${escapeHtml(translate("readMore"))}"
+								>
+									<span data-card-cta-text>${escapeHtml(translate("readMore"))}</span>
+									<svg class="h-4 w-4" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 16 10">
+										<path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M1 5h14m0 0L11 1m4 4L11 9" />
+									</svg>
+								</a>
+							</div>
+						</article>
+					`;
+				};
 
-                let cursor = 0;
-                let filteredPosts = posts.slice();
+				let cursor = 0;
+				let filteredPosts = posts.slice();
 
-                const updatePaginationVisibility = () => {
-                    if (!shouldPaginate) {
-                        paginationWrapper.hidden = true;
-                        return;
-                    }
+				const updateLanguageButtons = () => {
+					const buttons = languageToggle.querySelectorAll("[data-lang]");
+					buttons.forEach((button) => {
+						const lang = button.dataset.lang;
+						const isActive = lang === activeLanguage;
+						const base = button.dataset.baseClass || baseButtonClass;
+						button.className = `${base} ${isActive ? activeButtonClass : inactiveButtonClass}`.trim();
+						button.setAttribute("aria-pressed", String(isActive));
+					});
+				};
 
-                    const hasMultiplePages = filteredPosts.length > pageSize;
-                    paginationWrapper.hidden = !hasMultiplePages;
-                };
+				const updateStaticText = () => {
+					searchInput.placeholder = translate("searchPlaceholder");
+					const filterLabel = document.querySelector("[data-i18n-filter-label]");
+					if (filterLabel) {
+						filterLabel.textContent = translate("filterLabel");
+					}
+					const allYearsOption = filterSelect.querySelector("[data-i18n-all-years]");
+					if (allYearsOption) {
+						allYearsOption.textContent = translate("allYears");
+					}
+					const languageLabel = document.querySelector("[data-i18n-language-label]");
+					if (languageLabel) {
+						languageLabel.textContent = translate("languageToggleLabel");
+					}
+					const prevLabel = prevButton.querySelector("[data-i18n-pagination-prev]");
+					if (prevLabel) {
+						prevLabel.textContent = translate("paginationPrevious");
+					}
+					const nextLabel = nextButton.querySelector("[data-i18n-pagination-next]");
+					if (nextLabel) {
+						nextLabel.textContent = translate("paginationNext");
+					}
+				};
 
-                const renderPosts = () => {
-                    if (filteredPosts.length === 0) {
-                        grid.innerHTML =
-                            '<div class="rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center text-sm text-gray-500 sm:col-span-2 xl:col-span-3">Tidak ada tulisan yang cocok dengan pencarian.</div>';
-                        statusLabel.textContent = "";
-                        prevButton.disabled = true;
-                        nextButton.disabled = true;
-                        updatePaginationVisibility();
-                        return;
-                    }
+				const updatePaginationVisibility = () => {
+					if (!shouldPaginate) {
+						paginationWrapper.hidden = true;
+						return;
+					}
 
-                    if (shouldPaginate) {
-                        const maxCursor = Math.max(
-                            filteredPosts.length - pageSize,
-                            0,
-                        );
-                        if (cursor > maxCursor) {
-                            cursor = maxCursor;
-                        }
-                    }
+					const hasMultiplePages = filteredPosts.length > pageSize;
+					paginationWrapper.hidden = !hasMultiplePages;
+				};
 
-                    const start = shouldPaginate ? cursor : 0;
-                    const end = shouldPaginate
-                        ? Math.min(cursor + pageSize, filteredPosts.length)
-                        : filteredPosts.length;
-                    const slice = filteredPosts.slice(start, end);
+				const renderPosts = () => {
+					if (filteredPosts.length === 0) {
+						grid.innerHTML = `
+							<div class="rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center text-sm text-gray-500 sm:col-span-2 xl:col-span-3" data-empty-state>
+								${escapeHtml(translate("emptyNoResults"))}
+							</div>
+						`;
+						statusLabel.textContent = "";
+						prevButton.disabled = true;
+						nextButton.disabled = true;
+						updatePaginationVisibility();
+						return;
+					}
 
-                    grid.innerHTML = slice.map(renderCard).join("");
+					if (shouldPaginate) {
+						const maxCursor = Math.max(filteredPosts.length - pageSize, 0);
+						if (cursor > maxCursor) {
+							cursor = maxCursor;
+						}
+					}
 
-                    if (shouldPaginate) {
-                        const displayStart = start + 1;
-                        const displayEnd = end;
-                        statusLabel.textContent = `Menampilkan ${displayStart}–${displayEnd} dari ${filteredPosts.length}`;
-                        prevButton.disabled = start === 0;
-                        nextButton.disabled = end >= filteredPosts.length;
-                    } else {
-                        statusLabel.textContent = "";
-                        prevButton.disabled = true;
-                        nextButton.disabled = true;
-                    }
+					const start = shouldPaginate ? cursor : 0;
+					const end = shouldPaginate ? Math.min(cursor + pageSize, filteredPosts.length) : filteredPosts.length;
+					const slice = filteredPosts.slice(start, end);
 
-                    updatePaginationVisibility();
-                };
+					grid.innerHTML = slice.map(renderCard).join("");
 
-                const applyFilters = () => {
-                    const query = searchInput.value.trim().toLowerCase();
-                    const selectedYear = filterSelect.value;
+					if (shouldPaginate) {
+						const displayStart = start + 1;
+						const displayEnd = end;
+						statusLabel.textContent = translate("paginationStatus", {
+							start: displayStart,
+							end: displayEnd,
+							total: filteredPosts.length,
+						});
+						prevButton.disabled = start === 0;
+						nextButton.disabled = end >= filteredPosts.length;
+					} else {
+						statusLabel.textContent = "";
+						prevButton.disabled = true;
+						nextButton.disabled = true;
+					}
 
-                    filteredPosts = posts.filter((post) => {
-                        const matchesYear = selectedYear
-                            ? post.year === selectedYear
-                            : true;
-                        if (!matchesYear) {
-                            return false;
-                        }
+					updatePaginationVisibility();
+				};
 
-                        if (!query) {
-                            return true;
-                        }
+				const applyFilters = () => {
+					const query = searchInput.value.trim().toLowerCase();
+					const selectedYear = filterSelect.value;
 
-                        const haystack =
-                            `${post.title} ${post.description}`.toLowerCase();
-                        return haystack.includes(query);
-                    });
+					filteredPosts = posts.filter((post) => {
+						const matchesYear = selectedYear ? post.year === selectedYear : true;
+						if (!matchesYear) {
+							return false;
+						}
 
-                    cursor = 0;
-                    renderPosts();
-                };
+						if (!query) {
+							return true;
+						}
 
-                searchInput.addEventListener("input", () => {
-                    window.requestAnimationFrame(applyFilters);
-                });
+						const texts = post.texts || {};
+						const candidates = [
+							texts[activeLanguage],
+							texts[fallbackLanguage],
+							...Object.values(texts),
+						].filter(Boolean);
+						return candidates.some((text) => {
+							const haystack = `${text.title} ${text.description}`.toLowerCase();
+							return haystack.includes(query);
+						});
+					});
 
-                filterSelect.addEventListener("change", () => {
-                    applyFilters();
-                });
+					cursor = 0;
+					renderPosts();
+				};
 
-                prevButton.addEventListener("click", () => {
-                    cursor = Math.max(0, cursor - pageSize);
-                    renderPosts();
-                });
+				searchInput.addEventListener("input", () => {
+					window.requestAnimationFrame(applyFilters);
+				});
 
-                nextButton.addEventListener("click", () => {
-                    const nextCursor = cursor + pageSize;
-                    if (nextCursor < filteredPosts.length) {
-                        cursor = nextCursor;
-                    }
-                    renderPosts();
-                });
+				filterSelect.addEventListener("change", () => {
+					applyFilters();
+				});
 
-                renderPosts();
-            }
-        </script>
-    </main>
+				prevButton.addEventListener("click", () => {
+					cursor = Math.max(0, cursor - pageSize);
+					renderPosts();
+				});
+
+				nextButton.addEventListener("click", () => {
+					const nextCursor = cursor + pageSize;
+					if (nextCursor < filteredPosts.length) {
+						cursor = nextCursor;
+					}
+					renderPosts();
+				});
+
+				languageToggle.querySelectorAll("[data-lang]").forEach((button) => {
+					button.addEventListener("click", () => {
+						const selected = button.getAttribute("data-lang");
+						if (!selected || selected === activeLanguage) {
+							return;
+						}
+						activeLanguage = selected;
+						renderPosts();
+						updateStaticText();
+						updateLanguageButtons();
+						applyFilters();
+						if (typeof window !== "undefined") {
+							try {
+								window.localStorage?.setItem(storageKey, activeLanguage);
+							} catch (error) {
+								console.warn("Unable to persist language preference", error);
+							}
+						}
+					});
+				});
+
+				updateLanguageButtons();
+				updateStaticText();
+				renderPosts();
+			}
+		</script>
+	</main>
 </Layout>

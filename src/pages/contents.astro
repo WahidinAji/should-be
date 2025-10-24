@@ -1,77 +1,347 @@
 ---
 import type { MarkdownInstance } from "astro";
 import Layout from "../layouts/Layout.astro";
-
-type PostFrontmatter = {
-  title: string;
-  description: string;
-  date: string;
-  thumbnail?: string;
-  layout?: string;
-};
+import {
+	languages,
+	defaultLanguage,
+	baseLanguageButtonClass,
+	activeLanguageButtonClass,
+	inactiveLanguageButtonClass,
+	extractPostMetadata,
+	buildLocalizedPostTexts,
+	type LanguageCode,
+	type PostFrontmatter,
+} from "../common";
 
 const postModules = import.meta.glob<MarkdownInstance<PostFrontmatter>>(
-  "./contents/*.md",
-  { eager: true },
+	"./contents/*.md",
+	{ eager: true },
 );
 const posts = Object.values(postModules);
 
-const fallbackThumbnail = "../../../public/images/image.png";
-const thumbnailFor = (thumbnail?: string) =>
-  thumbnail && thumbnail.trim().length > 0 ? thumbnail : fallbackThumbnail;
+const uiCopy = {
+	languageToggleLabel: { id: "Bahasa", en: "Language" },
+	readMore: { id: "Baca selengkapnya", en: "Read more" },
+	emptyNoPosts: {
+		id: "Belum ada tulisan untuk ditampilkan.",
+		en: "No posts yet.",
+	},
+} as const satisfies Record<string, Record<LanguageCode, string>>;
+
+const normalizedPosts = posts
+	.map((post) => {
+		const metadata = extractPostMetadata(post.frontmatter);
+		const texts = buildLocalizedPostTexts(post.frontmatter);
+
+		return {
+			url: post.url,
+			thumbnail: metadata.thumbnail,
+			sortValue: metadata.sortValue,
+			texts,
+		};
+	})
+	.sort((a, b) => b.sortValue - a.sortValue)
+	.map(({ sortValue, ...rest }) => rest);
+
+const languagesJson = JSON.stringify(languages).replace(/</g, "\\u003c");
+const copyJson = JSON.stringify(uiCopy).replace(/</g, "\\u003c");
+const postsJson = JSON.stringify(normalizedPosts).replace(/</g, "\\u003c");
+
+const textFor = (
+	post: (typeof normalizedPosts)[number],
+	lang: LanguageCode = defaultLanguage,
+) =>
+	post.texts[lang] ??
+	post.texts[defaultLanguage] ??
+	Object.values(post.texts)[0];
+
+const localizedCopy = (
+	key: keyof typeof uiCopy,
+	lang: LanguageCode = defaultLanguage,
+) => {
+	const entry = uiCopy[key];
+	if (!entry) return "";
+	return entry[lang] ?? entry[defaultLanguage] ?? Object.values(entry)[0] ?? "";
+};
 ---
 
-<Layout>
-  <main class="mt-20 mx-auto w-full max-w-6xl px-6">
-    <div
-      class="grid grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
-    >
-      {
-        posts.map((post) => (
-          <div
-            class="flex h-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800"
-          >
-            <a href="#">
-              <img
-                class="rounded-t-lg"
-                src={thumbnailFor(post.frontmatter.thumbnail)}
-                alt={post.frontmatter.title}
-              />
-            </a>
-            <div class="flex h-full flex-col p-5">
-              <a href={post.url}>
-                <h5 class="mb-2 text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
-                  {post.frontmatter.title}
-                </h5>
-              </a>
-              <p class="mb-4 text-sm font-normal text-gray-700 dark:text-gray-400">
-                {post.frontmatter.description}
-              </p>
-              <a
-                href={post.url}
-                class="mt-auto inline-flex items-center rounded-lg bg-blue-700 px-3 py-2 text-sm font-medium text-center text-white hover:bg-blue-800 focus:outline-none focus:ring-4 focus:ring-blue-300 dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
-              >
-                Read more
-                <svg
-                  class="rtl:rotate-180 w-3.5 h-3.5 ms-2"
-                  aria-hidden="true"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 14 10"
-                >
-                  <path
-                    stroke="currentColor"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M1 5h12m0 0L9 1m4 4L9 9"
-                  />
-                </svg>
-              </a>
-            </div>
-          </div>
-        ))
-      }
-    </div>
-  </main>
+<Layout title="My Thoughts">
+	<main class="mt-20 mx-auto w-full max-w-6xl px-6 pb-20">
+		<div class="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
+			<h1 class="text-3xl font-semibold text-gray-800">My Thoughts</h1>
+			<div class="flex flex-col items-start gap-1 sm:items-end">
+				<span class="text-xs uppercase tracking-wide text-gray-400" data-i18n-language-label>
+					{localizedCopy("languageToggleLabel")}
+				</span>
+				<div
+					id="content-language-toggle"
+					class="inline-flex items-center gap-2 rounded-full bg-gray-100 p-1 sm:bg-transparent"
+					data-default-language={defaultLanguage}
+					data-active-class={activeLanguageButtonClass}
+					data-inactive-class={inactiveLanguageButtonClass}
+				>
+					{
+						languages.map((lang) => {
+							const isActive = lang.code === defaultLanguage;
+							return (
+								<button
+									type="button"
+									data-lang={lang.code}
+									data-base-class={baseLanguageButtonClass}
+									class={`${baseLanguageButtonClass} ${
+										isActive
+											? activeLanguageButtonClass
+											: inactiveLanguageButtonClass
+									}`}
+									aria-pressed={isActive}
+								>
+									{lang.label}
+								</button>
+							);
+						})
+					}
+				</div>
+			</div>
+		</div>
+
+		{
+			normalizedPosts.length > 0 ? (
+				<div class="mt-10 grid grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+					{
+						normalizedPosts.map((post, index) => {
+							const text = textFor(post);
+							return (
+								<div
+									class="flex h-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm"
+									data-content-card
+									data-index={index}
+								>
+									<a href={post.url}>
+										<img
+											class="h-48 w-full object-cover"
+											src={post.thumbnail}
+											alt={text.title}
+											loading="lazy"
+										/>
+									</a>
+									<div class="flex h-full flex-col p-5">
+										<a href={post.url}>
+											<h5 class="mb-2 text-xl font-semibold tracking-tight text-gray-900" data-card-title>
+												{text.title}
+											</h5>
+										</a>
+										<p class="mb-4 text-sm font-normal text-gray-700" data-card-description>
+											{text.description}
+										</p>
+					<a
+						href={post.url}
+						class="mt-auto inline-flex items-center rounded-lg bg-blue-700 px-3 py-2 text-sm font-medium text-white hover:bg-blue-800 focus:outline-none focus:ring-4 focus:ring-blue-300"
+						data-card-cta
+					>
+						<span data-card-cta-text>{localizedCopy("readMore")}</span>
+						<svg
+							class="rtl:rotate-180 w-3.5 h-3.5 ms-2"
+							aria-hidden="true"
+							xmlns="http://www.w3.org/2000/svg"
+							fill="none"
+												viewBox="0 0 14 10"
+											>
+												<path
+													stroke="currentColor"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													stroke-width="2"
+													d="M1 5h12m0 0L9 1m4 4L9 9"
+												/>
+											</svg>
+										</a>
+									</div>
+								</div>
+							);
+						})
+					}
+				</div>
+			) : (
+				<div class="mt-16 rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center text-sm text-gray-500" data-empty-state>
+					{localizedCopy("emptyNoPosts")}
+				</div>
+			)
+		}
+
+		<noscript>
+			<p class="mt-8 rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-4 text-center text-sm text-gray-500">
+				Aktifkan JavaScript untuk melihat tulisan dalam kedua bahasa.
+			</p>
+		</noscript>
+	</main>
+
+	<script id="content-languages" type="application/json" set:html={languagesJson}></script>
+	<script id="content-copy" type="application/json" set:html={copyJson}></script>
+	<script id="content-posts" type="application/json" set:html={postsJson}></script>
+	<script is:inline>
+		const postsElement = document.querySelector("#content-posts");
+		const languagesElement = document.querySelector("#content-languages");
+		const copyElement = document.querySelector("#content-copy");
+		const toggle = document.querySelector("#content-language-toggle");
+
+		if (postsElement && languagesElement && copyElement && toggle) {
+			let posts = [];
+			let languages = [];
+			let copy = {};
+			try {
+				posts = JSON.parse(postsElement.textContent || "[]");
+			} catch (error) {
+				console.error("Failed to parse posts data", error);
+			}
+
+			try {
+				languages = JSON.parse(languagesElement.textContent || "[]");
+			} catch (error) {
+				console.error("Failed to parse languages data", error);
+			}
+
+			try {
+				copy = JSON.parse(copyElement.textContent || "{}");
+			} catch (error) {
+				console.error("Failed to parse copy data", error);
+			}
+
+			const cards = Array.from(document.querySelectorAll("[data-content-card]"));
+			const languageLabel = document.querySelector("[data-i18n-language-label]");
+			const emptyState = document.querySelector("[data-empty-state]");
+			const storageKey = "preferred-language";
+		const defaultLanguage = toggle.dataset.defaultLanguage || languages[0]?.code || "id";
+		const detectPreferredLanguage = () => {
+			if (typeof navigator === "undefined") {
+				return null;
+			}
+
+			const available = languages.map((lang) => lang.code.toLowerCase());
+			const candidates =
+				Array.isArray(navigator.languages) && navigator.languages.length
+					? navigator.languages
+					: [navigator.language];
+
+			for (const candidate of candidates) {
+				if (!candidate) continue;
+				const normalized = candidate.toLowerCase();
+				const exact = available.find((code) => normalized === code);
+				if (exact) {
+					return exact;
+				}
+				const partial = available.find((code) => normalized.startsWith(`${code}-`));
+				if (partial) {
+					return partial;
+				}
+			}
+
+			return null;
+		};
+
+		let activeLanguage = defaultLanguage;
+
+		if (typeof window !== "undefined") {
+			try {
+				const stored = window.localStorage?.getItem(storageKey);
+				if (stored && languages.some((lang) => lang.code === stored)) {
+					activeLanguage = stored;
+				} else {
+					const detected = detectPreferredLanguage();
+					if (detected && languages.some((lang) => lang.code === detected)) {
+						activeLanguage = detected;
+					}
+				}
+			} catch (error) {
+				console.warn("Unable to read stored language", error);
+			}
+		}
+
+			const fallbackLanguage =
+				languages.find((lang) => lang.code === defaultLanguage)?.code || languages[0]?.code || "id";
+			const baseButtonClass = toggle.dataset.baseClass || "";
+			const activeButtonClass = toggle.dataset.activeClass || "";
+			const inactiveButtonClass = toggle.dataset.inactiveClass || "";
+
+			const translate = (key) => {
+				const entry = copy?.[key] ?? {};
+				return (
+					entry?.[activeLanguage] ??
+					entry?.[fallbackLanguage] ??
+					Object.values(entry)[0] ??
+					""
+				);
+			};
+
+			const textFor = (post) => {
+				const texts = post?.texts ?? {};
+				return (
+					texts[activeLanguage] ??
+					texts[fallbackLanguage] ??
+					Object.values(texts)[0] ?? { title: "", description: "" }
+				);
+			};
+
+			const updateCards = () => {
+				cards.forEach((card) => {
+					const index = Number(card.getAttribute("data-index"));
+					const post = posts[index];
+					if (!post) return;
+					const text = textFor(post);
+
+					const title = card.querySelector("[data-card-title]");
+					const description = card.querySelector("[data-card-description]");
+				const cta = card.querySelector("[data-card-cta]");
+				const ctaText = cta?.querySelector("[data-card-cta-text]");
+				const image = card.querySelector("img");
+
+				if (title) title.textContent = text.title;
+				if (description) description.textContent = text.description;
+				if (ctaText) ctaText.textContent = translate("readMore");
+				if (image) image.setAttribute("alt", text.title);
+				});
+
+				if (emptyState) {
+					emptyState.textContent = translate("emptyNoPosts");
+				}
+
+				if (languageLabel) {
+					languageLabel.textContent = translate("languageToggleLabel");
+				}
+			};
+
+			const updateLanguageButtons = () => {
+				toggle.querySelectorAll("[data-lang]").forEach((button) => {
+					const lang = button.dataset.lang;
+					const isActive = lang === activeLanguage;
+					const base = button.dataset.baseClass || baseButtonClass;
+					button.className = `${base} ${isActive ? activeButtonClass : inactiveButtonClass}`.trim();
+					button.setAttribute("aria-pressed", String(isActive));
+				});
+			};
+
+			updateCards();
+			updateLanguageButtons();
+
+			toggle.querySelectorAll("[data-lang]").forEach((button) => {
+				button.addEventListener("click", () => {
+					const selected = button.getAttribute("data-lang");
+					if (!selected || selected === activeLanguage) {
+						return;
+					}
+					activeLanguage = selected;
+					updateCards();
+					updateLanguageButtons();
+					if (typeof window !== "undefined") {
+						try {
+							window.localStorage?.setItem(storageKey, activeLanguage);
+						} catch (error) {
+							console.warn("Unable to persist language preference", error);
+						}
+					}
+				});
+			});
+
+			updateCards();
+		}
+	</script>
 </Layout>

@@ -61,7 +61,7 @@ pnpm exec biome lint --write
 pnpm exec biome lint --write <files>
 
 # Format, lint, and organize imports of all files
-pnpm exec biome check --write
+pnpm exec biome check --**write**
 
 # Format, lint, and organize imports of specific files
 pnpm exec biome check --write <files>

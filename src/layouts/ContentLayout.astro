@@ -1,18 +1,148 @@
 ---
 import Layout from "./Layout.astro";
+import {
+	languages,
+	defaultLanguage,
+	baseLanguageButtonClass,
+	activeLanguageButtonClass,
+	inactiveLanguageButtonClass,
+	getLocalizedString,
+	type LanguageCode,
+} from "../common";
 
 const { frontmatter } = Astro.props;
 const inputId = `heading-filter-input-${Math.random().toString(36).slice(2, 8)}`;
+
+const localized = getLocalizedString;
+
+const localizedTitle: Record<LanguageCode, string> = {
+	id: frontmatter.title ?? "Tanpa judul",
+	en: frontmatter.title_en ?? frontmatter.title ?? "Untitled",
+};
+const localizedDescription: Record<LanguageCode, string> = {
+	id: frontmatter.description ?? "",
+	en: frontmatter.description_en ?? frontmatter.description ?? "",
+};
+const toggleLabel: Record<LanguageCode, string> = {
+	id: "Bahasa",
+	en: "Language",
+};
+
+const languageToggleData = JSON.stringify({
+	languages,
+	defaultLanguage,
+	title: localizedTitle,
+	description: localizedDescription,
+	copy: { languageToggleLabel: toggleLabel },
+	buttonClasses: {
+		base: baseLanguageButtonClass,
+		active: activeLanguageButtonClass,
+		inactive: inactiveLanguageButtonClass,
+	},
+}).replace(/</g, "\\u003c");
 ---
 
-<Layout title={frontmatter.title}>
+<Layout title={localized(localizedTitle)}>
   <main class="mt-20 min-h-screen w-full flex flex-col items-center">
     <section class="w-full max-w-5xl">
-      <a href="/" class="flex justify-start hover:text-amber-500">
-        back
-      </a>
-      <div class="mt-4 w-full rounded-lg border border-gray-200 bg-white p-8 shadow-sm">
-        <div class="flex flex-col gap-4">
+      <div class="flex justify-between">
+        <a
+          href="/"
+          class="flex justify-start text-sm font-medium text-blue-600 transition hover:text-blue-700"
+        >
+          ← Back
+        </a>
+        <div class="flex flex-col items-start gap-1 sm:items-end">
+          <span
+            class="text-xs uppercase tracking-wide text-gray-400"
+            data-i18n-language-label
+          >
+            {localized(toggleLabel)}
+          </span>
+          <div
+            id="content-language-toggle"
+            class="inline-flex items-center gap-2 rounded-full bg-gray-100 p-1 sm:bg-transparent"
+            data-default-language={defaultLanguage}
+            data-active-class={activeLanguageButtonClass}
+            data-inactive-class={inactiveLanguageButtonClass}
+          >
+            {
+              languages.map((lang) => {
+                const isActive = lang.code === defaultLanguage;
+                return (
+                  <button
+                    type="button"
+                    data-lang={lang.code}
+                    data-base-class={baseLanguageButtonClass}
+                    class={`${baseLanguageButtonClass} ${
+                      isActive
+                        ? activeLanguageButtonClass
+                        : inactiveLanguageButtonClass
+                    }`}
+                    aria-pressed={isActive}
+                  >
+                    {lang.label}
+                  </button>
+                );
+              })
+            }
+          </div>
+        </div>
+      </div>
+      <div
+        class="mt-4 w-full rounded-lg border border-gray-200 bg-white p-8 shadow-sm"
+      >
+        <div class="flex flex-col gap-6">
+          <header
+            class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"
+          >
+            <div class="flex-1">
+              <h1 class="text-3xl font-semibold text-gray-900" data-i18n-title>
+                {localized(localizedTitle)}
+              </h1>
+              {
+                localized(localizedDescription).trim().length ? (
+                  <p class="mt-2 text-base text-gray-600" data-i18n-description>
+                    {localized(localizedDescription)}
+                  </p>
+                ) : null
+              }
+            </div>
+            <!-- <div class="flex flex-col items-start gap-1 sm:items-end">
+              <span class="text-xs uppercase tracking-wide text-gray-400" data-i18n-language-label>
+                {localized(toggleLabel)}
+              </span>
+              <div
+                id="content-language-toggle"
+                class="inline-flex items-center gap-2 rounded-full bg-gray-100 p-1 sm:bg-transparent"
+                data-default-language={defaultLanguage}
+                data-active-class={activeLanguageButtonClass}
+                data-inactive-class={inactiveLanguageButtonClass}
+              >
+                {
+                  languages.map((lang) => {
+                    const isActive = lang.code === defaultLanguage;
+                    return (
+                      <button
+                        type="button"
+                        data-lang={lang.code}
+                        data-base-class={baseLanguageButtonClass}
+                        class={`${baseLanguageButtonClass} ${
+                          isActive
+                            ? activeLanguageButtonClass
+                            : inactiveLanguageButtonClass
+                        }`}
+                        aria-pressed={isActive}
+                      >
+                        {lang.label}
+                      </button>
+                    );
+                  })
+                }
+              </div>
+            </div> -->
+          </header>
+
           <div class="heading-filter" data-target=".markdown-body">
             <button
               type="button"
@@ -28,13 +158,11 @@ const inputId = `heading-filter-input-${Math.random().toString(36).slice(2, 8)}`
                 <path
                   fill="currentColor"
                   d="M1.75 2a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5Zm3 4a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5Zm3 4a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5Z"
-                />
+                ></path>
               </svg>
             </button>
             <div class="heading-filter__panel" hidden>
-              <label class="sr-only" for={inputId}>
-                Filter headings
-              </label>
+              <label class="sr-only" for={inputId}> Filter headings </label>
               <input
                 id={inputId}
                 data-heading-filter-input
@@ -47,7 +175,8 @@ const inputId = `heading-filter-input-${Math.random().toString(36).slice(2, 8)}`
                 class="heading-filter__list"
                 role="listbox"
                 aria-label="Markdown headings"
-              ></ul>
+              >
+              </ul>
             </div>
           </div>
           <article class="markdown-body">
@@ -57,14 +186,6 @@ const inputId = `heading-filter-input-${Math.random().toString(36).slice(2, 8)}`
       </div>
     </section>
   </main>
-  <!-- <main class="mt-20 min-h-screen w-full bg-amber-50 flex justify-center">
-    <section class="w-full max-w-2xl flex flex-col bg-white p-6 rounded-lg shadow-sm h-200 my-6">
-      <h1>{frontmatter.title}</h1>
-      <h2>Post author: {frontmatter.author}</h2>
-      <p>{frontmatter.description}</p>
-      <slot />
-    </section>
-  </main> -->
   <script is:inline>
     (() => {
       const filters = Array.from(document.querySelectorAll(".heading-filter"));
@@ -192,6 +313,174 @@ const inputId = `heading-filter-input-${Math.random().toString(36).slice(2, 8)}`
           if (!filter.contains(event.target)) {
             closePanel();
           }
+        });
+      });
+    })();
+  </script>
+  <script
+    id="content-language-data"
+    type="application/json"
+    set:html={languageToggleData}
+  />
+  <script is:inline>
+    (() => {
+      const dataElement = document.querySelector("#content-language-data");
+      const toggle = document.querySelector("#content-language-toggle");
+      const article = document.querySelector(".markdown-body");
+      const titleElement = document.querySelector("[data-i18n-title]");
+      const descriptionElement = document.querySelector(
+        "[data-i18n-description]",
+      );
+      const languageLabel = document.querySelector(
+        "[data-i18n-language-label]",
+      );
+
+      if (!dataElement || !toggle || !article) {
+        return;
+      }
+
+      let payload = {};
+      try {
+        payload = JSON.parse(dataElement.textContent || "{}");
+      } catch (error) {
+        console.error("Failed to parse language payload", error);
+        return;
+      }
+
+      const {
+        languages = [],
+        defaultLanguage = "id",
+        title = {},
+        description = {},
+        copy = {},
+        buttonClasses = {},
+      } = payload;
+
+      const sections = Array.from(article.querySelectorAll("[data-lang]"));
+      const fallbackLanguage =
+        languages[0]?.code ||
+        defaultLanguage ||
+        sections[0]?.getAttribute("data-lang") ||
+        "id";
+      const storageKey = "preferred-language";
+
+      const detectPreferredLanguage = () => {
+        if (typeof navigator === "undefined") {
+          return null;
+        }
+
+        const available = languages.map((lang) => lang.code.toLowerCase());
+        const candidates =
+          Array.isArray(navigator.languages) && navigator.languages.length
+            ? navigator.languages
+            : [navigator.language];
+
+        for (const candidate of candidates) {
+          if (!candidate) continue;
+          const normalized = candidate.toLowerCase();
+          const exact = available.find((code) => normalized === code);
+          if (exact) {
+            return exact;
+          }
+          const partial = available.find((code) => normalized.startsWith(`${code}-`));
+          if (partial) {
+            return partial;
+          }
+        }
+
+        return null;
+      };
+
+      let activeLanguage = defaultLanguage;
+      if (typeof window !== "undefined") {
+        try {
+          const stored = window.localStorage?.getItem(storageKey);
+          if (stored && languages.some((lang) => lang.code === stored)) {
+            activeLanguage = stored;
+          } else {
+            const detected = detectPreferredLanguage();
+            if (detected && languages.some((lang) => lang.code === detected)) {
+              activeLanguage = detected;
+            }
+          }
+        } catch (error) {
+          console.warn("Unable to read stored language", error);
+        }
+      }
+
+      const translateEntry = (entry) =>
+        entry?.[activeLanguage] ??
+        entry?.[fallbackLanguage] ??
+        Object.values(entry ?? {})[0] ??
+        "";
+
+      const baseClass = buttonClasses.base ?? "";
+      const activeClass = buttonClasses.active ?? "";
+      const inactiveClass = buttonClasses.inactive ?? "";
+
+      const updateButtons = () => {
+        toggle.querySelectorAll("[data-lang]").forEach((button) => {
+          const lang = button.getAttribute("data-lang");
+          const isActive = lang === activeLanguage;
+          const buttonBase =
+            button.getAttribute("data-base-class") || baseClass;
+          button.className =
+            `${buttonBase} ${isActive ? activeClass : inactiveClass}`.trim();
+          button.setAttribute("aria-pressed", String(isActive));
+        });
+      };
+
+      const updateStaticText = () => {
+        if (titleElement) {
+          const value = translateEntry(title);
+          if (value) {
+            titleElement.textContent = value;
+          }
+        }
+        if (descriptionElement) {
+          const value = translateEntry(description);
+          if (value) {
+            descriptionElement.textContent = value;
+            descriptionElement.hidden = false;
+          } else {
+            descriptionElement.hidden = true;
+          }
+        }
+        if (languageLabel) {
+          languageLabel.textContent = translateEntry(
+            copy.languageToggleLabel ?? {},
+          );
+        }
+      };
+
+      const applyLanguage = () => {
+        sections.forEach((section) => {
+          const lang = section.getAttribute("data-lang");
+          section.hidden = lang !== activeLanguage;
+        });
+        updateStaticText();
+        updateButtons();
+        if (typeof window !== "undefined") {
+          try {
+            window.localStorage?.setItem(storageKey, activeLanguage);
+          } catch (error) {
+            console.warn("Unable to persist language preference", error);
+          }
+        }
+      };
+
+      updateButtons();
+      updateStaticText();
+      applyLanguage();
+
+      toggle.querySelectorAll("[data-lang]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const lang = button.getAttribute("data-lang");
+          if (!lang || lang === activeLanguage) {
+            return;
+          }
+          activeLanguage = lang;
+          applyLanguage();
         });
       });
     })();

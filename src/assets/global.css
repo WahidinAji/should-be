@@ -9,8 +9,9 @@
 	color: #1f2328;
 	line-height: 1.75;
 	font-size: 1rem;
-	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-		"Segoe UI", sans-serif;
+	font-family:
+		ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+		sans-serif;
 }
 
 .markdown-body > :first-child {
@@ -163,7 +164,9 @@
 	font-weight: 500;
 	line-height: 1.25rem;
 	cursor: pointer;
-	transition: background-color 0.2s ease, border-color 0.2s ease,
+	transition:
+		background-color 0.2s ease,
+		border-color 0.2s ease,
 		box-shadow 0.2s ease;
 }
 
@@ -246,7 +249,9 @@
 	color: #1f2328;
 	text-align: left;
 	cursor: pointer;
-	transition: background-color 0.2s ease, color 0.2s ease;
+	transition:
+		background-color 0.2s ease,
+		color 0.2s ease;
 }
 
 .heading-filter__result:hover,

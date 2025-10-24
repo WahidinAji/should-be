@@ -1,9 +1,9 @@
 {
 	"ninetyfive.indexingEnabled": "on",
-  "[astro]": {
-    "editor.tabSize": 2
-  },
-  "[mdx]": {
-    "editor.tabSize": 2
-  }
+	"[astro]": {
+		"editor.tabSize": 2
+	},
+	"[mdx]": {
+		"editor.tabSize": 2
+	}
 }
