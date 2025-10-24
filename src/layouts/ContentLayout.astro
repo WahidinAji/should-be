@@ -2,6 +2,7 @@
 import Layout from "./Layout.astro";
 
 const { frontmatter } = Astro.props;
+const inputId = `heading-filter-input-${Math.random().toString(36).slice(2, 8)}`;
 ---
 
 <Layout title={frontmatter.title}>
@@ -10,12 +11,49 @@ const { frontmatter } = Astro.props;
       <a href="/" class="flex justify-start hover:text-amber-500">
         back
       </a>
-      <div
-        class="flex flex-col bg-amber-50 p-6 rounded-lg shadow-sm h-200 mt-4"
-      >
-        <code>
-          <slot />
-        </code>
+      <div class="mt-4 w-full rounded-lg border border-gray-200 bg-white p-8 shadow-sm">
+        <div class="flex flex-col gap-4">
+          <div class="heading-filter" data-target=".markdown-body">
+            <button
+              type="button"
+              class="heading-filter__toggle"
+              aria-expanded="false"
+            >
+              <span>Filter headings</span>
+              <svg
+                aria-hidden="true"
+                class="heading-filter__icon"
+                viewBox="0 0 16 16"
+              >
+                <path
+                  fill="currentColor"
+                  d="M1.75 2a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5Zm3 4a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5Zm3 4a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5Z"
+                />
+              </svg>
+            </button>
+            <div class="heading-filter__panel" hidden>
+              <label class="sr-only" for={inputId}>
+                Filter headings
+              </label>
+              <input
+                id={inputId}
+                data-heading-filter-input
+                type="search"
+                placeholder="Filter headings"
+                class="heading-filter__search"
+                autocomplete="off"
+              />
+              <ul
+                class="heading-filter__list"
+                role="listbox"
+                aria-label="Markdown headings"
+              ></ul>
+            </div>
+          </div>
+          <article class="markdown-body">
+            <slot />
+          </article>
+        </div>
       </div>
     </section>
   </main>
@@ -27,4 +65,135 @@ const { frontmatter } = Astro.props;
       <slot />
     </section>
   </main> -->
+  <script is:inline>
+    (() => {
+      const filters = Array.from(document.querySelectorAll(".heading-filter"));
+
+      filters.forEach((filter, filterIndex) => {
+        const button = filter.querySelector(".heading-filter__toggle");
+        const panel = filter.querySelector(".heading-filter__panel");
+        const searchInput = filter.querySelector("[data-heading-filter-input]");
+        const list = filter.querySelector(".heading-filter__list");
+        const selector = filter.getAttribute("data-target") ?? ".markdown-body";
+        const scope =
+          filter.closest("section")?.querySelector(selector) ??
+          document.querySelector(selector);
+
+        if (!button || !panel || !searchInput || !list || !scope) {
+          return;
+        }
+
+        const headings = Array.from(
+          scope.querySelectorAll("h1, h2, h3, h4, h5, h6"),
+        ).filter(
+          (heading) => heading.textContent && heading.textContent.trim().length,
+        );
+
+        if (!headings.length) {
+          button.disabled = true;
+          button.setAttribute("aria-disabled", "true");
+          filter.classList.add("heading-filter--empty");
+          return;
+        }
+
+        const ensureId = (heading, fallbackIndex) => {
+          if (heading.id) return heading.id;
+          const base = (
+            heading.textContent ?? `heading-${filterIndex}-${fallbackIndex}`
+          )
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9\s-]/g, "")
+            .replace(/\s+/g, "-");
+          let candidate = base || `heading-${filterIndex}-${fallbackIndex}`;
+          let counter = 1;
+          while (document.getElementById(candidate)) {
+            candidate = `${base}-${counter}`;
+            counter += 1;
+          }
+          heading.id = candidate;
+          heading.setAttribute("tabindex", "-1");
+          return heading.id;
+        };
+
+        const items = headings.map((heading, headingIndex) => {
+          const level = Number(heading.tagName.slice(1));
+          const prefix = "#".repeat(Math.max(1, level));
+          const text = heading.textContent?.trim() ?? "";
+          const id = ensureId(heading, headingIndex);
+
+          const item = document.createElement("li");
+          item.className = "heading-filter__item";
+          item.setAttribute("role", "option");
+          item.dataset.search = `${prefix} ${text}`.toLowerCase();
+
+          const resultButton = document.createElement("button");
+          resultButton.type = "button";
+          resultButton.className = "heading-filter__result";
+          resultButton.dataset.level = String(level);
+          resultButton.textContent = `${prefix} ${text}`;
+          resultButton.addEventListener("click", () => {
+            const targetHash = `#${id}`;
+            if (typeof history !== "undefined" && history.replaceState) {
+              history.replaceState(null, "", targetHash);
+            } else {
+              document.location.hash = targetHash;
+            }
+            heading.scrollIntoView({ behavior: "smooth", block: "start" });
+            setTimeout(() => heading.focus(), 120);
+            closePanel();
+            button.focus();
+          });
+
+          item.appendChild(resultButton);
+          return item;
+        });
+
+        items.forEach((item) => list.appendChild(item));
+
+        function closePanel() {
+          panel.hidden = true;
+          button.setAttribute("aria-expanded", "false");
+        }
+
+        function openPanel() {
+          panel.hidden = false;
+          button.setAttribute("aria-expanded", "true");
+          searchInput.focus();
+          searchInput.select();
+        }
+
+        button.addEventListener("click", () => {
+          if (panel.hidden) {
+            openPanel();
+          } else {
+            closePanel();
+          }
+        });
+
+        searchInput.addEventListener("input", () => {
+          const term = searchInput.value.trim().toLowerCase();
+          items.forEach((item) => {
+            const matches =
+              !term || item.dataset.search?.includes(term) === true;
+            item.hidden = !matches;
+          });
+        });
+
+        searchInput.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") {
+            closePanel();
+            button.focus();
+          }
+        });
+
+        document.addEventListener("click", (event) => {
+          if (panel.hidden) return;
+          if (!filter.contains(event.target)) {
+            closePanel();
+          }
+        });
+      });
+    })();
+  </script>
 </Layout>

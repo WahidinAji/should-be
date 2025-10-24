@@ -22,12 +22,15 @@ const thumbnailFor = (thumbnail?: string) =>
 ---
 
 <Layout>
-  <!-- <main class="mt-20 flex mx-auto justify-start max-w-5xl w-full align-middle bg-amber-50 rounded-2xl p-10 shadow-sm"> -->
-  <main class="mt-20 flex mx-auto justify-start w-1/2 align-middle">
-    <div class="flex flex-row gap-8">
+  <main class="mt-20 mx-auto w-full max-w-6xl px-6">
+    <div
+      class="grid grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+    >
       {
         posts.map((post) => (
-          <div class="max-w-sm bg-white border border-gray-200 rounded-lg shadow-sm dark:bg-gray-800 dark:border-gray-700">
+          <div
+            class="flex h-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800"
+          >
             <a href="#">
               <img
                 class="rounded-t-lg"
@@ -35,18 +38,18 @@ const thumbnailFor = (thumbnail?: string) =>
                 alt={post.frontmatter.title}
               />
             </a>
-            <div class="p-5">
+            <div class="flex h-full flex-col p-5">
               <a href={post.url}>
                 <h5 class="mb-2 text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
                   {post.frontmatter.title}
                 </h5>
               </a>
-              <p class="mb-3 font-normal text-gray-700 dark:text-gray-400">
+              <p class="mb-4 text-sm font-normal text-gray-700 dark:text-gray-400">
                 {post.frontmatter.description}
               </p>
               <a
                 href={post.url}
-                class="inline-flex items-center px-3 py-2 text-sm font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
+                class="mt-auto inline-flex items-center rounded-lg bg-blue-700 px-3 py-2 text-sm font-medium text-center text-white hover:bg-blue-800 focus:outline-none focus:ring-4 focus:ring-blue-300 dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
               >
                 Read more
                 <svg

@@ -1,221 +1,434 @@
 ---
-import Header from "../components/Header.astro";
-import Footer from "../components/Footer.astro";
-import Main from "../components/Main.astro";
 import Layout from "../layouts/Layout.astro";
 
 type PostFrontmatter = {
-	title: string;
-	description: string;
-	date: string;
-	thumbnail?: string;
-	layout?: string;
+    title: string;
+    description: string;
+    date: string;
+    thumbnail?: string;
+    layout?: string;
 };
 import type { MarkdownInstance } from "astro";
 const postModules = import.meta.glob<MarkdownInstance<PostFrontmatter>>(
-	"./contents/*.md",
-	{ eager: true },
+    "./contents/*.md",
+    { eager: true },
 );
 const posts = Object.values(postModules);
 
 const fallbackThumbnail = "../../../public/images/image.png";
 const thumbnailFor = (thumbnail?: string) =>
-	thumbnail && thumbnail.trim().length > 0 ? thumbnail : fallbackThumbnail;
+    thumbnail && thumbnail.trim().length > 0 ? thumbnail : fallbackThumbnail;
+
+const parseDate = (value?: string) => {
+    if (!value) {
+        return null;
+    }
+
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.valueOf()) ? null : parsed;
+};
+
+const normalizedPosts = posts
+    .map((post) => {
+        const dateObject = parseDate(post.frontmatter.date);
+
+        return {
+            title: post.frontmatter.title ?? "Untitled",
+            description: post.frontmatter.description ?? "",
+            date: post.frontmatter.date ?? "",
+            year: dateObject ? String(dateObject.getFullYear()) : "Unknown",
+            thumbnail: thumbnailFor(post.frontmatter.thumbnail),
+            url: post.url,
+            sortValue: dateObject ? dateObject.valueOf() : 0,
+        };
+    })
+    .sort((a, b) => b.sortValue - a.sortValue)
+    .map(({ sortValue, ...rest }) => rest);
+
+const uniqueYears = Array.from(
+    new Set(normalizedPosts.map((post) => post.year)),
+);
+const chronologicalYears = uniqueYears
+    .filter((year) => year !== "Unknown")
+    .sort((a, b) => Number(b) - Number(a));
+if (uniqueYears.includes("Unknown")) {
+    chronologicalYears.push("Unknown");
+}
+
+const PAGINATION_THRESHOLD = 25;
+const PAGE_SIZE = 6;
+const shouldPaginate = normalizedPosts.length > PAGINATION_THRESHOLD;
+const resolvedPageSize =
+    normalizedPosts.length === 0
+        ? PAGE_SIZE
+        : shouldPaginate
+          ? PAGE_SIZE
+          : normalizedPosts.length;
+const initialPosts = normalizedPosts.slice(0, resolvedPageSize);
+const postsJson = JSON.stringify(normalizedPosts).replace(/</g, "\\u003c");
 ---
 
 <Layout title="Hi">
-	<!-- <Header /> -->
-	<!-- <main class="mt-20 flex mx-auto justify-center w-1/2 align-middle">
-		<div class="flex flex-row gap-8 border m-4">
-			<div
-				class="max-w-sm bg-white border border-gray-200 rounded-lg shadow-sm dark:bg-gray-800 dark:border-gray-700"
-			>
-				<a href="#">
-					<img class="rounded-t-lg" src="/src/assets/image.png" alt="" />
-				</a>
-				<div class="p-5">
-					<a href="#">
-						<h5
-							class="mb-2 text-2xl font-bold tracking-tight text-gray-900 dark:text-white"
-						>
-							Noteworthy technology acquisitions 2021
-						</h5>
-					</a>
-					<p class="mb-3 font-normal text-gray-700 dark:text-gray-400">
-						Here are the biggest enterprise technology acquisitions of 2021 so
-						far, in reverse chronological order.
-					</p>
-					<a
-						href="#"
-						class="inline-flex items-center px-3 py-2 text-sm font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
-					>
-						Read more
-						<svg
-							class="rtl:rotate-180 w-3.5 h-3.5 ms-2"
-							aria-hidden="true"
-							xmlns="http://www.w3.org/2000/svg"
-							fill="none"
-							viewBox="0 0 14 10"
-						>
-							<path
-								stroke="currentColor"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="2"
-								d="M1 5h12m0 0L9 1m4 4L9 9"></path>
-						</svg>
-					</a>
-				</div>
-			</div>
-			<div
-				class="max-w-sm bg-white border border-gray-200 rounded-lg shadow-sm dark:bg-gray-800 dark:border-gray-700"
-			>
-				<a href="#">
-					<img class="rounded-t-lg" src="/src/assets/image.png" alt="" />
-				</a>
-				<div class="p-5">
-					<a href="#">
-						<h5
-							class="mb-2 text-2xl font-bold tracking-tight text-gray-900 dark:text-white"
-						>
-							Noteworthy technology acquisitions 2021
-						</h5>
-					</a>
-					<p class="mb-3 font-normal text-gray-700 dark:text-gray-400">
-						Here are the biggest enterprise technology acquisitions of 2021 so
-						far, in reverse chronological order.
-					</p>
-					<a
-						href="#"
-						class="inline-flex items-center px-3 py-2 text-sm font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
-					>
-						Read more
-						<svg
-							class="rtl:rotate-180 w-3.5 h-3.5 ms-2"
-							aria-hidden="true"
-							xmlns="http://www.w3.org/2000/svg"
-							fill="none"
-							viewBox="0 0 14 10"
-						>
-							<path
-								stroke="currentColor"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="2"
-								d="M1 5h12m0 0L9 1m4 4L9 9"></path>
-						</svg>
-					</a>
-				</div>
-			</div>
-			<div
-				class="max-w-sm bg-white border border-gray-200 rounded-lg shadow-sm dark:bg-gray-800 dark:border-gray-700"
-			>
-				<a href="#">
-					<img class="rounded-t-lg" src="/src/assets/image.png" alt="" />
-				</a>
-				<div class="p-5">
-					<a href="#">
-						<h5
-							class="mb-2 text-2xl font-bold tracking-tight text-gray-900 dark:text-white"
-						>
-							Noteworthy technology acquisitions 2021
-						</h5>
-					</a>
-					<p class="mb-3 font-normal text-gray-700 dark:text-gray-400">
-						Here are the biggest enterprise technology acquisitions of 2021 so
-						far, in reverse chronological order.
-					</p>
-					<a
-						href="#"
-						class="inline-flex items-center px-3 py-2 text-sm font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
-					>
-						Read more
-						<svg
-							class="rtl:rotate-180 w-3.5 h-3.5 ms-2"
-							aria-hidden="true"
-							xmlns="http://www.w3.org/2000/svg"
-							fill="none"
-							viewBox="0 0 14 10"
-						>
-							<path
-								stroke="currentColor"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="2"
-								d="M1 5h12m0 0L9 1m4 4L9 9"></path>
-						</svg>
-					</a>
-				</div>
-			</div>
-		</div>
-	</main>
+    <main class="pt-32 pb-24 bg-slate-50 min-h-screen">
+        <section class="mx-auto flex w-full max-w-6xl flex-col px-6">
+            <header class="text-center">
+                <h1 class="text-3xl font-semibold text-gray-800">
+                    Hi there! I hope you are doing well and please enjoy the contents.
+                </h1>
+            </header>
 
-	<script>
-		import { Modal } from "flowbite";
+            <div
+                class="mt-10 flex flex-col gap-4 sm:mt-12 sm:flex-row sm:items-center sm:justify-between"
+            >
+                <label class="w-full sm:max-w-xs">
+                    <span class="sr-only">Search posts</span>
+                    <input
+                        id="posts-search"
+                        type="search"
+                        placeholder="Search thoughts…"
+                        class="w-full rounded-full border border-gray-200 bg-white px-5 py-3 text-sm text-gray-700 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                    />
+                </label>
+                <div
+                    class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3"
+                >
+                    <label
+                        for="posts-filter"
+                        class="text-sm font-medium text-gray-600 sm:whitespace-nowrap"
+                    >
+                        Filter by year
+                    </label>
+                    <select
+                        id="posts-filter"
+                        class="w-full rounded-full border border-gray-200 bg-white px-4 py-3 text-sm text-gray-700 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200 sm:w-40"
+                    >
+                        <option value="">All years</option>
+                        {
+                            chronologicalYears.map((year) => (
+                                <option value={year}>{year}</option>
+                            ))
+                        }
+                    </select>
+                </div>
+            </div>
 
-		// select the two elements that we'll work with
-		const $buttonElement: HTMLElement | null =
-			document.querySelector("#button");
-		const $modalElement: HTMLElement | null =
-			document.querySelector("#defaultModal");
+            <div
+                id="posts-grid"
+                class="mt-14 grid gap-8 sm:grid-cols-2 xl:grid-cols-3"
+                data-page-size={resolvedPageSize}
+                data-should-paginate={shouldPaginate}
+            >
+                {
+                    initialPosts.length > 0 ? (
+                        initialPosts.map((post) => (
+                            <article class="flex h-full flex-col rounded-3xl border border-gray-200 bg-white shadow-[0px_10px_35px_rgba(15,23,42,0.08)] transition duration-200 hover:-translate-y-1 hover:shadow-[0px_18px_45px_rgba(15,23,42,0.12)]">
+                                <a href={post.url} class="overflow-hidden">
+                                    <img
+                                        class="h-48 w-full object-cover"
+                                        src={post.thumbnail}
+                                        alt={post.title}
+                                        loading="lazy"
+                                    />
+                                </a>
+                                <div class="flex flex-1 flex-col px-7 py-6">
+                                    <a href={post.url}>
+                                        <h2 class="text-xl font-semibold text-gray-900">
+                                            {post.title}
+                                        </h2>
+                                    </a>
+                                    <p class="mt-3 flex-1 text-sm leading-relaxed text-gray-600">
+                                        {post.description}
+                                    </p>
+                                    <a
+                                        href={post.url}
+                                        class="mt-6 inline-flex w-fit items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
+                                    >
+                                        Read more
+                                        <svg
+                                            class="h-4 w-4"
+                                            aria-hidden="true"
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            fill="none"
+                                            viewBox="0 0 16 10"
+                                        >
+                                            <path
+                                                stroke="currentColor"
+                                                stroke-linecap="round"
+                                                stroke-linejoin="round"
+                                                stroke-width="2"
+                                                d="M1 5h14m0 0L11 1m4 4L11 9"
+                                            />
+                                        </svg>
+                                    </a>
+                                </div>
+                            </article>
+                        ))
+                    ) : (
+                        <div class="rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center text-sm text-gray-500 sm:col-span-2 xl:col-span-3">
+                            Belum ada tulisan untuk ditampilkan.
+                        </div>
+                    )
+                }
+            </div>
 
-		// create a new modal component
-		const modal = new Modal($modalElement);
+            <div
+                id="posts-pagination"
+                class="mt-16 flex flex-col items-center justify-between gap-4 sm:flex-row"
+                {...shouldPaginate ? {} : { hidden: true }}
+            >
+                <div class="flex items-center gap-3">
+                    <button
+                        id="pagination-prev"
+                        type="button"
+                        class="inline-flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 transition hover:border-blue-500 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400"
+                    >
+                        <svg
+                            class="h-4 w-4"
+                            xmlns="http://www.w3.org/2000/svg"
+                            fill="none"
+                            viewBox="0 0 12 10"
+                            aria-hidden="true"
+                        >
+                            <path
+                                d="M11 5H1m0 0 3-3m-3 3 3 3"
+                                stroke="currentColor"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"></path>
+                        </svg>
+                        Previous
+                    </button>
+                    <button
+                        id="pagination-next"
+                        type="button"
+                        class="inline-flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 transition hover:border-blue-500 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400"
+                    >
+                        Next
+                        <svg
+                            class="h-4 w-4"
+                            xmlns="http://www.w3.org/2000/svg"
+                            fill="none"
+                            viewBox="0 0 12 10"
+                            aria-hidden="true"
+                        >
+                            <path
+                                d="M1 5h10m0 0-3-3m3 3-3 3"
+                                stroke="currentColor"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"></path>
+                        </svg>
+                    </button>
+                </div>
+                <p
+                    id="pagination-status"
+                    class="text-sm text-gray-500"
+                    aria-live="polite"
+                >
+                </p>
+            </div>
 
-		// toggle the visibility of the modal when clicking on the button
-		if ($buttonElement) {
-			$buttonElement.addEventListener("click", () => modal.toggle());
-		}
-	</script> -->
+            <noscript>
+                <p
+                    class="mt-8 rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-4 text-center text-sm text-gray-500"
+                >
+                    Aktifkan JavaScript untuk mencari, memfilter, dan menelusuri
+                    tulisan lainnya.
+                </p>
+            </noscript>
+        </section>
 
-	<!-- <Footer /> -->
+        <script id="posts-data" type="application/json" set:html={postsJson} />
+        <script is:inline>
+            const stateElement = document.querySelector("#posts-data");
+            const grid = document.querySelector("#posts-grid");
+            const searchInput = document.querySelector("#posts-search");
+            const filterSelect = document.querySelector("#posts-filter");
+            const paginationWrapper =
+                document.querySelector("#posts-pagination");
+            const prevButton = document.querySelector("#pagination-prev");
+            const nextButton = document.querySelector("#pagination-next");
+            const statusLabel = document.querySelector("#pagination-status");
 
-	<main class="mt-20 flex mx-auto justify-start w-1/2 align-middle">
-		<div class="flex flex-row gap-8">
-			{
-				posts.map((post) => (
-					<div class="max-w-sm bg-white border border-gray-200 rounded-lg shadow-sm dark:bg-gray-800 dark:border-gray-700">
-						<a href="#">
+            if (
+                stateElement &&
+                grid &&
+                searchInput &&
+                filterSelect &&
+                paginationWrapper &&
+                prevButton &&
+                nextButton &&
+                statusLabel
+            ) {
+                let posts = [];
+                try {
+                    posts = JSON.parse(stateElement.textContent || "[]");
+                } catch (error) {
+                    console.error("Failed to parse posts data", error);
+                    posts = [];
+                }
+                const shouldPaginate = grid.dataset.shouldPaginate === "true";
+                const basePageSize = parseInt(grid.dataset.pageSize || "", 10);
+                const fallbackPageSize =
+                    Number.isFinite(basePageSize) && basePageSize > 0
+                        ? basePageSize
+                        : 1;
+                const pageSize = shouldPaginate
+                    ? fallbackPageSize
+                    : posts.length || fallbackPageSize;
+
+                const escapeHtml = (value) =>
+                    String(value ?? "").replace(/[&<>"']/g, (char) => {
+                        switch (char) {
+                            case "&":
+                                return "&amp;";
+                            case "<":
+                                return "&lt;";
+                            case ">":
+                                return "&gt;";
+                            case '"':
+                                return "&quot;";
+                            case "'":
+                                return "&#039;";
+                            default:
+                                return char;
+                        }
+                    });
+
+                const renderCard = (post) => `
+					<article class="flex h-full flex-col rounded-3xl border border-gray-200 bg-white shadow-[0px_10px_35px_rgba(15,23,42,0.08)] transition duration-200 hover:-translate-y-1 hover:shadow-[0px_18px_45px_rgba(15,23,42,0.12)]">
+						<a href="${escapeHtml(post.url)}" class="overflow-hidden">
 							<img
-								class="rounded-t-lg"
-								src={thumbnailFor(post.frontmatter.thumbnail)}
-								alt={post.frontmatter.title}
+								class="h-48 w-full object-cover"
+								src="${escapeHtml(post.thumbnail)}"
+								alt="${escapeHtml(post.title)}"
+								loading="lazy"
 							/>
 						</a>
-						<div class="p-5">
-							<a href={post.url}>
-								<h5 class="mb-2 text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
-									{post.frontmatter.title}
-								</h5>
+						<div class="flex flex-1 flex-col px-7 py-6">
+							<a href="${escapeHtml(post.url)}">
+								<h2 class="text-xl font-semibold text-gray-900">${escapeHtml(post.title)}</h2>
 							</a>
-							<p class="mb-3 font-normal text-gray-700 dark:text-gray-400">
-								{post.frontmatter.description}
-							</p>
+							<p class="mt-3 flex-1 text-sm leading-relaxed text-gray-600">${escapeHtml(post.description)}</p>
 							<a
-								href={post.url}
-								class="inline-flex items-center px-3 py-2 text-sm font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
+								href="${escapeHtml(post.url)}"
+								class="mt-6 inline-flex w-fit items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
+								aria-label="Read more about ${escapeHtml(post.title)}"
 							>
 								Read more
-								<svg
-									class="rtl:rotate-180 w-3.5 h-3.5 ms-2"
-									aria-hidden="true"
-									xmlns="http://www.w3.org/2000/svg"
-									fill="none"
-									viewBox="0 0 14 10"
-								>
-									<path
-										stroke="currentColor"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										stroke-width="2"
-										d="M1 5h12m0 0L9 1m4 4L9 9"
-									/>
+								<svg class="h-4 w-4" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 16 10">
+									<path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M1 5h14m0 0L11 1m4 4L11 9" />
 								</svg>
 							</a>
 						</div>
-					</div>
-				))
-			}
-		</div>
-	</main>
+					</article>
+				`;
+
+                let cursor = 0;
+                let filteredPosts = posts.slice();
+
+                const updatePaginationVisibility = () => {
+                    if (!shouldPaginate) {
+                        paginationWrapper.hidden = true;
+                        return;
+                    }
+
+                    const hasMultiplePages = filteredPosts.length > pageSize;
+                    paginationWrapper.hidden = !hasMultiplePages;
+                };
+
+                const renderPosts = () => {
+                    if (filteredPosts.length === 0) {
+                        grid.innerHTML =
+                            '<div class="rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center text-sm text-gray-500 sm:col-span-2 xl:col-span-3">Tidak ada tulisan yang cocok dengan pencarian.</div>';
+                        statusLabel.textContent = "";
+                        prevButton.disabled = true;
+                        nextButton.disabled = true;
+                        updatePaginationVisibility();
+                        return;
+                    }
+
+                    if (shouldPaginate) {
+                        const maxCursor = Math.max(
+                            filteredPosts.length - pageSize,
+                            0,
+                        );
+                        if (cursor > maxCursor) {
+                            cursor = maxCursor;
+                        }
+                    }
+
+                    const start = shouldPaginate ? cursor : 0;
+                    const end = shouldPaginate
+                        ? Math.min(cursor + pageSize, filteredPosts.length)
+                        : filteredPosts.length;
+                    const slice = filteredPosts.slice(start, end);
+
+                    grid.innerHTML = slice.map(renderCard).join("");
+
+                    if (shouldPaginate) {
+                        const displayStart = start + 1;
+                        const displayEnd = end;
+                        statusLabel.textContent = `Menampilkan ${displayStart}–${displayEnd} dari ${filteredPosts.length}`;
+                        prevButton.disabled = start === 0;
+                        nextButton.disabled = end >= filteredPosts.length;
+                    } else {
+                        statusLabel.textContent = "";
+                        prevButton.disabled = true;
+                        nextButton.disabled = true;
+                    }
+
+                    updatePaginationVisibility();
+                };
+
+                const applyFilters = () => {
+                    const query = searchInput.value.trim().toLowerCase();
+                    const selectedYear = filterSelect.value;
+
+                    filteredPosts = posts.filter((post) => {
+                        const matchesYear = selectedYear
+                            ? post.year === selectedYear
+                            : true;
+                        if (!matchesYear) {
+                            return false;
+                        }
+
+                        if (!query) {
+                            return true;
+                        }
+
+                        const haystack =
+                            `${post.title} ${post.description}`.toLowerCase();
+                        return haystack.includes(query);
+                    });
+
+                    cursor = 0;
+                    renderPosts();
+                };
+
+                searchInput.addEventListener("input", () => {
+                    window.requestAnimationFrame(applyFilters);
+                });
+
+                filterSelect.addEventListener("change", () => {
+                    applyFilters();
+                });
+
+                prevButton.addEventListener("click", () => {
+                    cursor = Math.max(0, cursor - pageSize);
+                    renderPosts();
+                });
+
+                nextButton.addEventListener("click", () => {
+                    const nextCursor = cursor + pageSize;
+                    if (nextCursor < filteredPosts.length) {
+                        cursor = nextCursor;
+                    }
+                    renderPosts();
+                });
+
+                renderPosts();
+            }
+        </script>
+    </main>
 </Layout>
