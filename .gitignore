@@ -25,3 +25,5 @@ pnpm-debug.log*
 
 # AI documentation
 ai-docs
+
+.wrangler/
