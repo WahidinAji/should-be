@@ -11,3 +11,4 @@
 // });
 
 // export const collections = { blog };
+export const collections = {};
