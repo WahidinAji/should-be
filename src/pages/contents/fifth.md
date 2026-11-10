@@ -1,1365 +1,1162 @@
 ---
 layout: ../../layouts/ContentLayout.astro
-title: "TCP: Lapisan Transport dari Handshake sampai Kernel Linux"
-title_en: "TCP: The Transport Layer from Handshake to the Linux Kernel"
-description: Di mana TCP berada, apa isi header-nya, handshake, retransmisi, state machine, kapan memakainya, simulasi interaktif, dan cara kernel Linux menjalankannya di balik socket.
-description_en: Where TCP sits, what is in its header, the handshake, retransmission, the state machine, when to use it, an interactive simulation, and how the Linux kernel runs it behind a socket.
+title: "Model OSI: Tujuh Lapisan Jaringan dan Letaknya di Linux"
+title_en: "The OSI Model: Seven Network Layers and Where Linux Runs Each One"
+description: Tujuh lapisan OSI dari kabel sampai aplikasi. Apa kerja tiap lapisan, kapan kamu berurusan dengannya, simulasi interaktif, dan bagian mana yang dijalankan kernel Linux, user space, atau hardware.
+description_en: The seven OSI layers from the cable to the application. What each layer does, when you deal with it, an interactive simulation, and which part Linux runs in the kernel, in user space, or in hardware.
 date: 2026-11-10
 tags:
   - linux
   - networking
-  - tcp
+  - osi
   - kernel
   - notes
 ---
 
 <div data-lang="en" hidden>
 
-## Where TCP sits
+## What the OSI model is
 
-Networking is done in layers. Each layer does one job, adds its own header, and hands the packet to the layer below.
+The OSI model (Open Systems Interconnection) is a reference model that ISO published in 1984. It splits network communication into seven layers. Each layer does one job and only talks to the layer directly above and below it.
+
+The internet does not run OSI protocols. It runs the TCP/IP suite, which has four layers. People still use the OSI numbers every day. "L2 switch", "L4 load balancer", and "L7 firewall" all refer to OSI layers. When someone says "it's an L3 problem", they mean routing or IP addresses.
+
+A mnemonic for the order, from layer 1 up: **P**lease **D**o **N**ot **T**hrow **S**ausage **P**izza **A**way.
+
+## The seven layers at a glance
+
+| # | Layer        | Unit of data  | Address       | Examples                          | Device                 | Who runs it in Linux            |
+| - | ------------ | ------------- | ------------- | --------------------------------- | ---------------------- | ------------------------------- |
+| 7 | Application  | message       | URL, hostname | HTTP, DNS, SSH, SMTP              | L7 proxy, WAF          | your program (nginx, curl, sshd) |
+| 6 | Presentation | message       | none          | TLS encryption, UTF-8, JSON, gzip | none                   | libraries in your program (OpenSSL, zlib) |
+| 5 | Session      | message       | session ID    | TLS sessions, HTTP/2 streams, RPC | none                   | libraries in your program        |
+| 4 | Transport    | segment (TCP), datagram (UDP) | port | TCP, UDP                   | L4 load balancer, stateful firewall | kernel (TCP, UDP, sockets) |
+| 3 | Network      | packet        | IP address    | IPv4, IPv6, ICMP                  | router                 | kernel (routing, netfilter)      |
+| 2 | Data link    | frame         | MAC address   | Ethernet, Wi-Fi, VLAN, ARP        | switch, access point   | kernel and driver (bridge, ARP)  |
+| 1 | Physical     | bit           | none          | copper, fiber, radio              | cable, hub, repeater   | network card hardware            |
+
+## OSI and TCP/IP side by side
 
 ```
- OSI model            TCP/IP model        examples
- ───────────────      ──────────────      ──────────────────────────
+ OSI model            TCP/IP model        what actually runs
+ ───────────────      ──────────────      ──────────────────────────────
  7 Application   ┐
- 6 Presentation  ├──► Application         HTTP, SSH, DNS, TLS
+ 6 Presentation  ├──► Application         HTTP, DNS, SSH, TLS, JSON
  5 Session       ┘
- 4 Transport     ───► Transport           TCP, UDP, QUIC (over UDP)   ◄── this post
+ 4 Transport     ───► Transport           TCP, UDP
  3 Network       ───► Internet            IP, ICMP
  2 Data link     ┐
  1 Physical      ┴──► Link                Ethernet, Wi-Fi, ARP
 ```
 
-TCP is layer 4, the transport layer. IP (layer 3) moves a packet from one machine to another, with no promise that it arrives, arrives once, or arrives in order. TCP runs on top of IP. It numbers the bytes, waits for acknowledgments, and resends what goes missing, so two programs get a reliable byte stream.
+TCP/IP merges layers 5, 6, and 7 into one application layer, because in practice one program does all three. It also merges layers 1 and 2, because one network card does both.
 
-This is what one TCP packet looks like on an Ethernet cable, with each layer's header in front of the data:
+Some protocols do not fit one layer. TLS encrypts data (layer 6), keeps session state (layer 5), and runs inside the application process (layer 7). ARP turns IP addresses (layer 3) into MAC addresses (layer 2). Use the model to locate a problem, and do not argue about where a protocol "really" belongs.
 
-```
- ┌──────────┬──────────┬───────────┬──────────────────────────┬─────┐
- │ Ethernet │    IP    │    TCP    │        your data         │ FCS │
- │   14 B   │   20 B   │  20-60 B  │  up to MSS, often 1460 B │ 4 B │
- └──────────┴──────────┴───────────┴──────────────────────────┴─────┘
-  which NIC   which      which program,
-  on the link machine    where in the stream
-```
+## Encapsulation: how the layers stack
 
-| Layer     | Address it uses        | Question it answers              |
-| --------- | ---------------------- | -------------------------------- |
-| Link      | MAC address            | Which network card on this cable or Wi-Fi? |
-| Internet  | IP address             | Which machine, anywhere?         |
-| Transport | Port number            | Which program on that machine?   |
-| Application | URL, hostname, path  | What does the message mean?      |
-
-What TCP promises:
-
-- Every byte arrives, or the connection reports an error.
-- Bytes arrive in the order they were sent, with no duplicates.
-- The sender slows down when the receiver is busy (flow control).
-- The sender slows down when the network is full (congestion control).
-
-What TCP does **not** give you:
-
-- Message boundaries. Two `write()` calls of 100 bytes can arrive as one `read()` of 200 bytes, or as 150 + 50. Your protocol must mark where a message ends (a length prefix, a newline, HTTP's `Content-Length`).
-- Low latency under loss. A lost packet blocks every byte behind it until the sender resends it.
-- Security. Anyone on the path can read and change TCP traffic. TLS, running on top of TCP, adds encryption.
-
-## The TCP header
+When a program sends data, each layer going down adds its own header in front. The receiving machine removes them going up, in reverse order.
 
 ```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|          Source Port          |       Destination Port        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                        Sequence Number                        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     Acknowledgment Number                     |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  Data |       |C|E|U|A|P|R|S|F|                               |
-| Offset| Rsrvd |W|C|R|C|S|S|Y|I|            Window             |
-|       |       |R|E|G|K|H|T|N|N|                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|           Checksum            |         Urgent Pointer        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                    Options (0 to 40 bytes)                    |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ L7  Application                            [ GET / HTTP/1.1 ]
+ L6  Presentation                   [ TLS │ encrypted HTTP ]
+ L5  Session                        (same bytes, inside an open TLS session)
+ L4  Transport                [ TCP │ TLS │ encrypted HTTP ]
+ L3  Network             [ IP │ TCP │ TLS │ encrypted HTTP ]
+ L2  Data link    [ ETH │ IP │ TCP │ TLS │ encrypted HTTP │ FCS ]
+ L1  Physical     10110001011101001010101110101001010...
 ```
 
-| Field              | Meaning                                                            |
-| ------------------ | ------------------------------------------------------------------ |
-| Source / Destination Port | 16 bits each, so 0 to 65535. Picks the program.             |
-| Sequence Number    | Position of the first data byte in this segment, counted in bytes. |
-| Acknowledgment Number | "I have every byte before this one. Send this one next."        |
-| Data Offset        | Header length in 32-bit words (5 = 20 bytes, 15 = 60 bytes).       |
-| `SYN`              | "Let's start. My first sequence number is this."                   |
-| `ACK`              | The acknowledgment number is valid. Set on almost every packet after the first. |
-| `FIN`              | "I have no more data to send."                                     |
-| `RST`              | "This connection does not exist. Stop." Aborts at once.            |
-| `PSH`              | "Hand this to the application now." Usually set on the last segment of a write. |
-| `ECE` / `CWR`      | Explicit Congestion Notification, a router marks instead of dropping. |
-| Window             | How many more bytes the receiver can buffer right now.            |
-| Checksum           | Detects corrupted segments. A bad one is dropped silently.        |
-| Options            | Negotiated in the SYN: `mss`, `wscale`, `sackOK`, timestamps.      |
-
-The window field is only 16 bits (64 KB max), which is too small for fast links. The window scale option (`wscale 7` means multiply by 2^7 = 128) fixes that. You will see all four options in every `tcpdump` of a SYN.
-
-## Ports, sockets, and the 4-tuple
-
-Four values identify a TCP connection:
-
-```
- (source IP, source port, destination IP, destination port)
-  10.0.0.1   51234        10.0.0.2         443
-```
-
-The server's side is fixed (`10.0.0.2:443`). The client's port is an **ephemeral port** that the kernel picks from `net.ipv4.ip_local_port_range` (32768 to 60999 by default). Since any of the four values can differ, one server port can hold hundreds of thousands of connections at once. Each connection gets its own socket.
-
-A socket is the kernel object for one end of a connection. To your program it is just a file descriptor, a small integer such as `3`.
-
-## Opening a connection: the three-way handshake
-
-```
-   client                                          server
- (CLOSED)                                        (LISTEN)
-    │ ── SYN  seq=1000 ──────────────────────────────► │
- SYN-SENT                                     SYN-RECEIVED
-    │ ◄──────────────────── SYN+ACK seq=5000 ack=1001 │
- ESTABLISHED                                          │
-    │ ── ACK  ack=5001 ──────────────────────────────► │
-    │                                           ESTABLISHED
-```
-
-1. The client sends `SYN` with a random **initial sequence number** (ISN). The ISN is random so an attacker cannot guess it and inject fake packets.
-2. The server answers `SYN+ACK` with its own ISN. `ack=1001` means "I got your byte 1000". A SYN counts as one byte even though it carries no data.
-3. The client sends `ACK`. Both sides are now `ESTABLISHED`.
-
-Each side has its own sequence numbers, because a TCP connection is two independent byte streams, one in each direction. The handshake costs one round trip before any data moves. On a 100 ms link, that is 100 ms of waiting, and TLS adds at least one more round trip on top. Reusing connections (HTTP keep-alive, connection pools) skips that wait on every request after the first.
-
-## Moving data: sequence numbers, ACKs, and windows
-
-```
- client                                   server
-   │ ── seq=1001 len=1000 ──────────────────► │
-   │ ── seq=2001 len=1000 ──────────────────► │
-   │ ◄─────────────────────────── ack=3001 ── │   "I have everything up to 3000"
-```
-
-ACKs are cumulative. `ack=3001` confirms every byte before 3001, so one ACK can cover many segments. Linux also delays ACKs a little and acknowledges every second segment, which halves the ACK traffic.
-
-The sender can have this much unacknowledged data in flight:
-
-```
- in flight ≤ min(rwnd, cwnd)
-             │      └── congestion window: the sender's guess of what the NETWORK can take
-             └── receive window: what the RECEIVER said it can buffer (the Window field)
-```
-
-**Flow control** (`rwnd`) protects the receiver. If your program stops calling `read()`, the receive buffer fills, the advertised window drops to 0, and the sender stops. This is a "zero window", and `tcpdump` shows it as `win 0`.
-
-**Congestion control** (`cwnd`) protects the network. A new connection starts with `cwnd` = 10 segments (about 14 KB), then roughly doubles it every round trip (slow start) until it sees loss. After a loss it backs off and grows slowly. Linux uses CUBIC by default. BBR is the other common choice. It measures bandwidth and RTT instead of treating every loss as congestion, so it keeps a higher speed on long or lossy links.
-
-```bash
-sysctl net.ipv4.tcp_congestion_control             # cubic
-sysctl net.ipv4.tcp_available_congestion_control   # reno cubic (bbr after modprobe tcp_bbr)
-```
-
-### When a packet is lost
-
-TCP finds out about loss in two ways:
-
-- **Duplicate ACKs.** The receiver keeps sending the same `ack` number, because one segment is missing and it cannot acknowledge past it. After three duplicates the sender resends the missing segment right away. This is **fast retransmit**. The SACK option tells the sender exactly which blocks arrived, so it resends only the missing one. Modern Linux also uses RACK, which detects loss by time ("a segment sent after this one was ACKed long ago") instead of by counting duplicates.
-- **Retransmission timeout (RTO).** If no ACK arrives at all, a timer fires. The RTO is based on measured RTT, with a 200 ms minimum on Linux and 1 second before any RTT is known. Each timeout doubles the wait.
-
-The application never sees any of this. It only sees `read()` taking a little longer.
-
-## Closing: FIN, TIME-WAIT, and RST
-
-```
-   client (closes first)                           server
- ESTABLISHED                                    ESTABLISHED
-    │ ── FIN  seq=1101 ──────────────────────────────► │
- FIN-WAIT-1                                     CLOSE-WAIT   ◄── server's read() returns 0
-    │ ◄───────────────────────────────── ACK ack=1102 │
- FIN-WAIT-2                                           │      (the server may still send)
-    │ ◄───────────────────────────────── FIN seq=5301 │      ◄── server app calls close()
- TIME-WAIT                                       LAST-ACK
-    │ ── ACK  ack=5302 ──────────────────────────────► │
-    │    (waits 60 s)                             CLOSED
- CLOSED
-```
-
-Each direction closes on its own, so a normal close takes four packets. The side that sends `FIN` first is the **active closer**, and it ends up in `TIME-WAIT`.
-
-`TIME-WAIT` lasts 60 seconds on Linux, a value fixed in the kernel source. It exists for two reasons. If the last `ACK` is lost, the peer resends its `FIN`, and the closer must still remember the connection to ACK it again. It also stops a delayed packet from this connection from landing in a new connection that reuses the same 4-tuple.
-
-`RST` aborts a connection at once, with no close sequence. The kernel sends it when:
-
-- a SYN arrives for a port where nothing listens, which your program sees as "Connection refused",
-- a packet arrives for a connection the kernel does not know, for example after a reboot,
-- a program calls `close()` while unread data is still in its receive buffer,
-- a firewall rule says `reject with tcp reset`.
-
-## The state machine
-
-```
-                     connect() / send SYN
-           ┌──────────────────────────────────────► SYN-SENT ──────────────┐
-           │                                                               │ got SYN+ACK
-       CLOSED                                                              │ send ACK
-           │  listen()                got SYN                              ▼
-           └─────────────► LISTEN ─────────────► SYN-RECEIVED ──────► ESTABLISHED
-                                   send SYN+ACK              got ACK       │
-                                                                           │
-            we close first:   FIN-WAIT-1 ──► FIN-WAIT-2 ──► TIME-WAIT ──(60 s)──► CLOSED
-            peer closes first: CLOSE-WAIT ──(our close())──► LAST-ACK ──► CLOSED
-```
-
-| State          | Meaning                                      | Worry when                                  |
-| -------------- | -------------------------------------------- | ------------------------------------------- |
-| `LISTEN`       | Server socket waiting for SYNs.               | It is missing. Nothing will accept connections. |
-| `SYN-SENT`     | Client sent SYN, no answer yet.               | It lasts. Something drops your SYN.         |
-| `SYN-RECEIVED` | Server got SYN, sent SYN+ACK, waits for ACK.  | Thousands of them. Possible SYN flood.      |
-| `ESTABLISHED`  | Open, data can flow both ways.                | Never, it is the normal state.              |
-| `FIN-WAIT-1/2` | We closed, waiting for the peer to close.     | Many `FIN-WAIT-2`. The peer never closes its side. |
-| `CLOSE-WAIT`   | Peer closed, **our program has not called `close()`**. | It grows. This is a bug in your code. |
-| `LAST-ACK`     | We closed after the peer, waiting for its ACK. | Rarely an issue.                          |
-| `TIME-WAIT`    | We closed first, waiting 60 s.                | Only if you run out of ephemeral ports.     |
-
-`ss -tan` shows these states. `ss` names `ESTABLISHED` as `ESTAB` and `SYN-RECEIVED` as `SYN-RECV`.
+Each layer only reads its own header and treats the rest as payload. A switch reads the Ethernet header and nothing else. A router reads the IP header. Only the receiving program reads the HTTP request. This is why you can change Wi-Fi to Ethernet (layer 1 and 2) without changing your browser (layer 7).
 
 ## Simulation
 
-Pick a scenario and step through it. Each arrow is one packet. The boxes show each side's TCP state after the packet, and the bottom panel shows roughly what `tcpdump` would print.
+Pick a scenario and step through it. The two stacks are the sending and receiving machines, the middle column shows the devices in between, and the bar at the bottom shows the packet as it looks at that moment. Each colored block is one layer's header.
 
-<div class="tcp-sim" data-sim-lang="en"></div>
+<div class="osi-sim" data-sim-lang="en"></div>
 
 Things to notice:
 
-- In the normal scenario, no application code runs during the handshake. Both kernels finish it before `accept()` returns.
-- In the packet loss scenario, the server holds segments 3 to 5 but cannot give them to the application until the client resends segment 2. This is **head-of-line blocking**.
-- The refused scenario fails in one round trip. The dropped scenario takes about two minutes. When a connection hangs instead of failing fast, look for a firewall that drops packets.
+- In the HTTPS scenario, the switch only reads the Ethernet header, and the router only reads up to the IP header. Neither can see the HTTP request, because TLS encrypted it at layer 6.
+- The router builds a new Ethernet header for the next link. MAC addresses change at every hop, and the IP addresses stay the same (except where NAT rewrites them).
+- In the ping scenario, nothing above layer 3 runs. The router's kernel answers by itself. A working ping proves layers 1 to 3 and nothing else.
+- In the DNS scenario, UDP sends the question in the first packet with no handshake. If it is lost, the kernel does not resend it. The resolver program retries.
 
-## TCP runs in the kernel
+## Where each layer runs in Linux
 
-Your program never builds a TCP packet. TCP runs inside the operating system kernel. Your program asks the kernel for a socket and reads and writes bytes through system calls. The kernel handles sequence numbers, ACKs, timers, retransmission, and congestion control.
-
-```python
-import socket
-
-srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)    # socket(): new file descriptor
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # can restart while old sockets sit in TIME-WAIT
-srv.bind(("0.0.0.0", 9000))                                # bind(): claim port 9000
-srv.listen(128)                                            # listen(): kernel now answers SYNs by itself
-
-while True:
-    conn, addr = srv.accept()   # accept(): take one finished handshake from the accept queue
-    data = conn.recv(4096)      # recv(): copy bytes out of the kernel's receive buffer
-    conn.sendall(data)          # send(): copy bytes into the kernel's send buffer
-    conn.close()                # close(): kernel sends FIN
+```
+            ┌───────────────────────────────────────────┐
+ L7         │ your program: nginx, curl, sshd, browser  │
+ L6         │ libraries: OpenSSL, zlib, JSON parser     │   user space
+ L5         │ TLS session, HTTP/2 streams               │
+            ├──────── socket API (system calls) ────────┤ ◄── socket(), connect(), read(), write()
+ L4         │ TCP, UDP                                  │
+ L3         │ IP, routing table, netfilter (nftables)   │   kernel
+ L2         │ ARP, bridges, VLANs, qdisc, driver        │
+            ├───────────────────────────────────────────┤
+ L1 (+L2)   │ network card: PHY, MAC, checksum, DMA     │   hardware
+            └───────────────────────────────────────────┘
 ```
 
-| System call       | Sent on the wire           | What the kernel does                                      |
-| ----------------- | -------------------------- | --------------------------------------------------------- |
-| `socket()`        | nothing                    | Creates the socket and returns a file descriptor.         |
-| `bind()`          | nothing                    | Reserves the address and port, or fails with `EADDRINUSE`. |
-| `listen(backlog)` | nothing                    | Marks the socket `LISTEN` and sizes its accept queue.     |
-| `connect()`       | SYN, then ACK              | Runs the handshake. Returns when `ESTABLISHED`, or fails with `ECONNREFUSED` or `ETIMEDOUT`. |
-| `accept()`        | nothing                    | Takes a finished connection off the accept queue and returns a new descriptor for it. |
-| `write()` / `send()` | data, now or later      | Copies bytes into the send buffer and returns. Blocks only when the buffer is full. |
-| `read()` / `recv()` | sometimes a window update | Copies bytes out of the receive buffer. Returns 0 once the peer sent FIN. |
-| `shutdown(SHUT_WR)` | FIN                      | Closes only your sending direction. You can still read.   |
-| `close()`         | FIN, or RST if unread data remains | Releases the descriptor. The kernel finishes the close in the background. |
+The socket API is the line between the layers. Everything at layer 4 and below runs in the kernel and the network card. Everything at layer 5 and above runs inside your program. Your program never builds an IP or TCP header. It calls `write()` on a socket, and the kernel does layers 4 to 2.
 
-A successful `write()` only means the kernel copied your bytes. It does not mean the other side received them. If the peer crashes a second later, you find out on a later `write()` or `read()`.
+This split explains a few everyday Linux facts:
 
-You can watch these calls with `strace`:
+- Changing routes, firewall rules, or interfaces needs root, because those live in the kernel. Running a web server on port 8080 does not.
+- Ports below 1024 need root or `CAP_NET_BIND_SERVICE`. The kernel enforces this at layer 4 (`net.ipv4.ip_unprivileged_port_start = 1024`).
+- `ping` works without root on modern distributions, because the kernel offers unprivileged ICMP sockets (`net.ipv4.ping_group_range`).
+- A Docker container shares the host kernel, so it shares layers 2 to 4 code. It gets its own interfaces, routes, and sockets through a network namespace.
+
+Some tools move work across the line:
+
+| Tool       | What it moves                                                         |
+| ---------- | --------------------------------------------------------------------- |
+| kTLS       | TLS encryption (layer 6) into the kernel, so nginx can `sendfile()` over HTTPS. Load with `modprobe tls`. |
+| QUIC       | Reliable delivery (layer 4 work) into the program, on top of UDP. HTTP/3 uses it. |
+| TUN / TAP  | A virtual interface that hands layer 3 packets (TUN) or layer 2 frames (TAP) to a program. VPNs such as OpenVPN and Tailscale use TUN. |
+| XDP / eBPF | Small programs that run in the driver before the kernel's layer 2 and 3 code, used for fast packet filtering. |
+| DPDK       | The program takes over the network card and runs layers 2 to 4 itself, for very high packet rates. |
+
+Other operating systems split the work the same way with different names:
+
+| Layer        | Linux                       | Windows                       | macOS                              |
+| ------------ | --------------------------- | ----------------------------- | ---------------------------------- |
+| L1, L2       | driver (`r8169`, `iwlwifi`) | NDIS miniport driver          | DriverKit / IOKit driver           |
+| L3, L4       | kernel net stack            | `tcpip.sys`                   | XNU kernel, BSD-derived stack      |
+| boundary     | BSD sockets                 | Winsock                       | BSD sockets, Network.framework     |
+| L6 (TLS)     | OpenSSL, GnuTLS, kTLS       | Schannel                      | Network.framework                  |
+| L7           | your program                | your program                  | your program                       |
+
+The protocols on the wire are the same everywhere, so a Windows laptop and a Linux server talk without any special handling.
+
+## Layer by layer
+
+### Layer 1: Physical
+
+Layer 1 moves raw bits as voltage on copper, light in fiber, or radio waves. It knows nothing about addresses. It decides link speed (100 Mbit/s, 1 Gbit/s, 10 Gbit/s), duplex, connectors, and cable types.
+
+The network card does this work. Linux only reads the result through the driver.
 
 ```bash
-strace -e trace=socket,connect,sendto,recvfrom python3 -c '
-import socket
-s = socket.create_connection(("127.0.0.1", 8765))
-s.sendall(b"GET / HTTP/1.0\r\n\r\n")
-s.recv(100)'
+ip -br link                               # UP, DOWN, or NO-CARRIER for each interface
+cat /sys/class/net/enp4s0/carrier         # 1 = cable plugged in and link up
+cat /sys/class/net/enp4s0/speed           # 1000 = 1 Gbit/s
+sudo ethtool enp4s0                       # speed, duplex, "Link detected: yes"
+ip -s link show enp4s0                    # packet, error, and drop counters
+dmesg -T | grep -i 'link is'              # "Link is Up - 1Gbps/Full"
+iw dev wlan0 link                         # Wi-Fi signal strength and bitrate
 ```
 
 ```
-socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_TCP) = 3
-connect(3, {sa_family=AF_INET, sin_port=htons(8765), sin_addr=inet_addr("127.0.0.1")}, 16) = 0
-sendto(3, "GET / HTTP/1.0\r\n\r\n", 18, 0, NULL, 0) = 18
-recvfrom(3, "HTTP/1.0 200 OK\r\nServer: SimpleH"..., 100, 0, NULL, NULL) = 100
+$ ip -s link show enp4s0
+3: enp4s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000
+    link/ether 00:2b:67:61:2c:81 brd ff:ff:ff:ff:ff:ff
+    RX:  bytes packets errors dropped  missed   mcast
+     342006120  446999      0     386       0    6821
+    TX:  bytes packets errors dropped carrier collsns
+     191352187  347042      0       0       0       0
 ```
 
-The `3` is the file descriptor. A socket is a file to Linux, so `ls -l /proc/<pid>/fd` lists it as `socket:[123456]`, and `ss -tp` maps it back to the process.
+`LOWER_UP` means the card sees a link. `UP` alone only means someone ran `ip link set up`.
 
-### The two queues behind `listen()`
+You work at layer 1 when:
 
-```
-             SYN                         final ACK                       accept()
- client ───────────► SYN queue ─────────────────────► accept queue ─────────────► your program
-                     half-open connections            finished handshakes
-                     (tcp_max_syn_backlog)            limit: min(backlog, net.core.somaxconn)
-```
+- `ip link` shows `NO-CARRIER`. The cable is unplugged, broken, or the switch port is off.
+- The link runs at 100 Mbit/s instead of 1 Gbit/s. One pair in the cable is often damaged.
+- `errors` keeps growing in `ip -s link`. Bad cable, bad port, or interference.
+- Wi-Fi is slow and `iw` shows a weak signal (worse than about -70 dBm).
 
-The kernel completes handshakes even when your program is busy. Finished connections wait in the accept queue until `accept()` takes them. If the accept queue is full, Linux drops the final ACK and new SYNs, and clients sit in `SYN-SENT` while they retry. `nstat` counts these drops as `TcpExtListenOverflows`. Under a SYN flood, SYN cookies (`net.ipv4.tcp_syncookies = 1`) let the server answer without storing anything in the SYN queue.
+### Layer 2: Data link
 
-### The path of one packet through Linux
+Layer 2 moves frames between machines on the same local network, meaning the same switch or the same Wi-Fi. The address is the 48-bit MAC address burned into each network card.
 
-```
-          SENDING                                         RECEIVING
- user     write(fd, buf)                                  read(fd, buf)
- ─────────────│─────────────────── syscall ─────────────────────▲─────────────
- kernel       ▼                                                 │
-        socket send buffer (tcp_wmem)               socket receive buffer (tcp_rmem)
-              ▼                                                 ▲
-        TCP: cut into segments, seq numbers,        TCP: check seq, reorder,
-             cwnd, retransmit timers                     send ACKs, update window
-              ▼                                                 ▲
-        IP: choose route, add IP header             IP: is this packet for me?
-              ▼                                                 ▲
-        netfilter: output, postrouting              netfilter: prerouting, input
-              ▼                                                 ▲
-        qdisc (tc): queue, shape, delay             GRO: merge small segments
-              ▼                                                 ▲
-        driver ──► NIC ──► wire ═══════════════════► NIC ──► interrupt, NAPI poll
-```
+An Ethernet frame has a destination MAC, a source MAC, a type field (`0x0800` for IPv4, `0x86DD` for IPv6, `0x0806` for ARP), the payload, and a 4-byte checksum (FCS) at the end. The largest payload is the MTU, usually 1500 bytes.
 
-- netfilter is where nftables rules run. A `drop` rule there sends nothing back, so `connect()` hangs until it times out. See the nftables post for the hooks.
-- qdisc is the transmit queue. `tc` controls it, and `netem` can add fake delay and loss there, which the lab below uses.
-- Offloads (TSO, GSO, GRO) let the kernel hand the network card one 64 KB chunk and let the card cut it into 1460-byte segments. This is why `tcpdump` sometimes shows a "packet" much larger than the MTU. `ethtool -k eth0` lists them.
+A switch learns which MAC address sits behind which port and sends each frame only to that port. ARP finds the MAC address for an IP address on the local network. A machine broadcasts "who has 192.168.1.1?" and the owner replies with its MAC. VLANs (802.1Q) add a tag to the frame so one physical switch acts as several separate ones.
 
-The kernel shows its TCP internals in a few places:
+In Linux, the driver and the kernel do layer 2. The kernel keeps the ARP table, and it can act as a switch. `docker0` and every `br-*` interface is a software switch (a bridge), and each container is plugged into one with a `veth` pair.
 
 ```bash
-ss -tan                        # every TCP socket and its state
-ss -ti                         # plus internals: rtt, cwnd, retransmits
-nstat -az | grep -i tcp        # kernel TCP counters (retransmits, drops, resets)
-cat /proc/net/tcp              # raw socket table, what ss reads (hex)
-sysctl -a | grep net.ipv4.tcp  # all tuning knobs
+ip link show enp4s0                     # link/ether = your MAC, mtu = largest payload
+ip neigh                                # ARP table: IP to MAC for machines on your LAN
+sudo arping -I enp4s0 192.168.1.1       # send ARP requests directly
+sudo tcpdump -eni enp4s0 arp            # -e prints MAC addresses
+bridge link                             # which interfaces are plugged into which bridge
+ip -d link show docker0                 # -d shows it is a bridge
+sudo ip link add link enp4s0 name enp4s0.10 type vlan id 10   # VLAN 10 on top of enp4s0
 ```
 
-### Linux and other operating systems
+```
+$ ip neigh
+192.168.1.1 dev enp4s0 lladdr d8:9a:0d:80:8f:f9 REACHABLE
+172.19.0.2 dev br-68d019f1085b lladdr 06:79:9a:ff:17:c3 REACHABLE
+172.22.0.2 dev br-3325c98c3499 lladdr f6:49:01:ca:f3:93 STALE
+```
 
-Linux, Windows, macOS, and the BSDs each have their own TCP code. All of them expose the same Berkeley sockets API (`socket`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`). That is why the same Python or Go program runs on all of them unchanged.
+The first line is the home router. The other two are Docker containers behind software bridges.
 
-| OS      | Where TCP lives                       | How you tune it                   |
-| ------- | ------------------------------------- | --------------------------------- |
-| Linux   | kernel, `net/ipv4/tcp*.c`             | `sysctl net.ipv4.tcp_*`, `ss`, `tc` |
-| Windows | kernel driver `tcpip.sys`, Winsock API | `netsh int tcp`, PowerShell `Get-NetTCPConnection` |
-| macOS   | XNU kernel, BSD-derived stack         | `sysctl net.inet.tcp.*`, `netstat` |
+You work at layer 2 when:
 
-The protocol on the wire is the same everywhere, so a Windows client talks to a Linux server with no special handling. Defaults differ, such as initial windows, TIME-WAIT length, and keepalive timers. Windows and macOS also use CUBIC by default.
+- `ip neigh` shows `FAILED` or `INCOMPLETE` for your gateway. You can reach nothing outside the LAN.
+- Two machines have the same IP. ARP answers flip between two MACs, and connections drop at random.
+- Small packets work but large ones hang. SSH logs in, then freezes on `ls` of a big directory. The MTU is smaller somewhere on the path, often a VPN or tunnel.
+- You plug a cable into two ports of the same switch and the network dies. That loop makes broadcasts circle forever, unless the switch runs Spanning Tree.
 
-Two exceptions skip the kernel's TCP. QUIC (used by HTTP/3) runs in the application's own process on top of UDP, so browsers can ship new versions without waiting for an OS update. Kernel-bypass libraries such as DPDK run a TCP stack in user space for very high packet rates.
+### Layer 3: Network
 
-## When to use TCP, and when not
+Layer 3 moves packets between networks, across the whole internet, one router at a time. The address is the IP address plus a subnet mask, which says which addresses are local.
 
-| Use TCP when                                 | Use UDP when                                    |
-| -------------------------------------------- | ----------------------------------------------- |
-| Every byte matters: files, web pages, APIs   | Late data is useless: voice, video calls, games |
-| Order matters: database queries, SSH sessions | Messages are small and independent: DNS, NTP   |
-| You want the OS to handle retries for you    | You need to send to many hosts at once (multicast) |
-| Long-lived connections: HTTP/1.1, HTTP/2, gRPC | You build your own reliability, like QUIC     |
+Every router reads the destination IP, looks it up in its routing table, and sends the packet to the next router. Each router lowers the TTL (time to live) by one. When TTL reaches 0, the router drops the packet and sends back an ICMP "time exceeded" message. `traceroute` uses this to find every router on the path. ICMP also carries `ping` and error messages such as "destination unreachable". Your home router also does NAT. It rewrites your private source address (`192.168.x.x`) into its one public address.
 
-Common protocols and their transport:
-
-| Protocol             | Transport | Why                                              |
-| -------------------- | --------- | ------------------------------------------------ |
-| HTTP/1.1, HTTP/2     | TCP       | Pages and API responses must be complete.        |
-| HTTP/3               | QUIC on UDP | Avoids TCP head-of-line blocking on lossy mobile links, 0-RTT reconnect. |
-| SSH, PostgreSQL, MySQL, Redis | TCP | Commands must arrive once and in order.     |
-| DNS                  | UDP, TCP for large answers and zone transfers | One small question, one small answer. |
-| WebRTC, VoIP         | UDP       | A frame that arrives 300 ms late is worse than a missing frame. |
-| WireGuard            | UDP       | Tunnels TCP inside. TCP over TCP retransmits twice and stalls. |
-
-A common mistake is building a real-time game or video feed on TCP. When one packet is lost, every newer packet waits behind it. With UDP you skip the lost one and use the newest data.
-
-## Hands-on lab on Linux
-
-This lab builds two network namespaces joined by a virtual cable, so you can break the network without touching your real one. Steps 1 to 4 need root. Step 5 does not.
-
-### 1. Set up two namespaces
+In Linux, the kernel does layer 3. It owns the routing table, decides whether a packet is for this machine or should be forwarded, and runs netfilter hooks where nftables rules apply.
 
 ```bash
-sudo ip netns add client
-sudo ip netns add server
-sudo ip link add veth-c type veth peer name veth-s     # a virtual cable with two ends
-sudo ip link set veth-c netns client                    # plug one end into "client"
-sudo ip link set veth-s netns server                    # and the other into "server"
-sudo ip -n client addr add 10.0.0.1/24 dev veth-c
-sudo ip -n server addr add 10.0.0.2/24 dev veth-s
-sudo ip -n client link set veth-c up
-sudo ip -n server link set veth-s up
-sudo ip -n server link set lo up
-
-cl() { sudo ip netns exec client "$@"; }   # run a command inside "client"
-sv() { sudo ip netns exec server "$@"; }   # run a command inside "server"
-
-cl ping -c 2 10.0.0.2
+ip -br addr                             # IP addresses on each interface
+ip route                                # routing table
+ip route get 1.1.1.1                    # the route, interface, and source IP the kernel would use
+ping -c 3 192.168.1.1                   # ICMP echo: does layer 3 reach that host?
+tracepath -n 1.1.1.1                    # every router on the path, plus the path MTU
+mtr -n 1.1.1.1                          # live traceroute with packet loss per hop
+sysctl net.ipv4.ip_forward              # 1 = this machine routes packets for others
+sudo nft list ruleset                   # firewall rules on the layer 3 hooks
 ```
 
-The two functions work in bash and zsh. Each namespace has its own interfaces, routes, sockets, firewall, and TCP sysctls.
+```
+$ ip route get 1.1.1.1
+1.1.1.1 via 192.168.1.1 dev enp4s0 src 192.168.1.6 uid 1000
 
-### 2. Watch a handshake
+$ tracepath -n 1.1.1.1
+ 1?: [LOCALHOST]                      pmtu 1500
+ 1:  192.168.1.1                                           0.655ms
+ 2:  10.89.192.1                                           6.320ms
+ 3:  no reply
+ 4:  162.158.43.14                                         3.588ms
+```
+
+You work at layer 3 when:
+
+- You get `Network is unreachable`. The kernel has no route for that address. Check `ip route` for a `default via` line.
+- You get `No route to host`. A route exists, but the host did not answer ARP, or a router or firewall sent back ICMP "unreachable".
+- The LAN works and the internet does not. The default gateway is wrong or down.
+- A Linux box should route (a VPN server, a Docker host, a router) and does not. `ip_forward` is 0, or the firewall's `forward` chain drops the traffic.
+- `ping` works but the service does not. Layer 3 is fine. Move up to layer 4.
+
+### Layer 4: Transport
+
+Layer 4 moves data between programs. IP gets a packet to the right machine. The port number gets it to the right program on that machine. Four values identify a connection: source IP, source port, destination IP, and destination port.
+
+There are two main protocols.
+
+TCP gives a reliable, ordered byte stream. It opens a connection with a three-way handshake, numbers every byte, waits for acknowledgments, resends what is lost, and slows down when the network or the receiver is full.
+
+```
+ client                                 server (listening on port 443)
+   │ ── SYN ─────────────────────────────► │
+   │ ◄──────────────────────────── SYN+ACK │
+   │ ── ACK ─────────────────────────────► │   connection open, data can flow
+```
+
+UDP sends independent datagrams. It has no handshake, no ordering, and no resending. Its header is 8 bytes. A lost datagram is gone unless the program sends it again.
+
+| Use TCP when                                    | Use UDP when                                     |
+| ----------------------------------------------- | ------------------------------------------------ |
+| Every byte matters: web pages, files, APIs, SSH | Late data is useless: voice and video calls, games |
+| Order matters: database queries                 | Messages are small and independent: DNS, NTP, DHCP |
+| You want the kernel to handle resending         | You handle reliability yourself, as QUIC does    |
+
+HTTP/3 runs on QUIC, which runs on UDP. QUIC does the layer 4 work inside the browser, so one lost packet only stalls one stream instead of the whole connection.
+
+In Linux, the kernel runs TCP and UDP. Your program only sees a socket, which is a file descriptor.
 
 ```bash
-mkdir -p /tmp/tcplab && head -c 20M /dev/urandom > /tmp/tcplab/blob
-sv python3 -m http.server 8080 --bind 10.0.0.2 --directory /tmp/tcplab   # terminal 1
-sv tcpdump -ni veth-s tcp port 8080                                     # terminal 2
-cl curl -s -o /dev/null http://10.0.0.2:8080/                           # terminal 3
+ss -tulpn                               # listening TCP and UDP ports and their processes
+ss -tan state established               # open TCP connections
+ss -ti                                  # per-connection details: rtt, congestion window, retransmits
+nc -zv example.com 443                  # can a TCP connection to this port be opened?
+sudo tcpdump -ni any 'tcp[tcpflags] & tcp-syn != 0'   # only connection attempts
+nstat -az | grep -i retrans             # kernel retransmission counters
 ```
 
-The first three lines of the `tcpdump` output are the handshake (trimmed):
-
 ```
-10.0.0.1.41822 > 10.0.0.2.8080: Flags [S],  seq 3542141823, win 64240, options [mss 1460,sackOK,TS ...,nop,wscale 7], length 0
-10.0.0.2.8080 > 10.0.0.1.41822: Flags [S.], seq 1803340530, ack 3542141824, win 65160, options [mss 1460,sackOK,TS ...,nop,wscale 7], length 0
-10.0.0.1.41822 > 10.0.0.2.8080: Flags [.],  ack 1, win 502, length 0
+$ ss -tlnp
+State  Recv-Q Send-Q   Local Address:Port  Peer Address:Port
+LISTEN 0      4096     127.0.0.53%lo:53         0.0.0.0:*
+LISTEN 0      4096           0.0.0.0:4000       0.0.0.0:*
 ```
 
-| `tcpdump` flag | TCP flags        |
-| -------------- | ---------------- |
-| `[S]`          | SYN              |
-| `[S.]`         | SYN+ACK (`.` means ACK) |
-| `[.]`          | ACK only         |
-| `[P.]`         | PSH+ACK, carries data |
-| `[F.]`         | FIN+ACK          |
-| `[R]` / `[R.]` | RST              |
+`127.0.0.53:53` is systemd-resolved, the local DNS cache. It listens on loopback only, so other machines cannot reach it. `0.0.0.0:4000` accepts connections on every interface.
 
-After the handshake `tcpdump` shows sequence numbers relative to the ISN (`ack 1`), which is easier to read. Add `-S` to see the absolute values. `win 502` looks tiny, but with `wscale 7` it means 502 × 128 = 64256 bytes.
+You work at layer 4 when:
 
-### 3. Refused, dropped, and rejected
+- You get `Connection refused`. The host is up, but nothing listens on that port and the kernel answered with RST. Check `ss -tlnp`.
+- The connection hangs and then times out. Something drops the packets, usually a firewall. A refusal fails in milliseconds and a timeout takes seconds or minutes.
+- The service works on the server itself but not from outside. It listens on `127.0.0.1` instead of `0.0.0.0`.
+- You get `Address already in use`. Another process holds the port.
+- The `CLOSE-WAIT` count keeps growing in `ss -tan`. Your program does not call `close()` on sockets the other side has closed.
+
+### Layer 5: Session
+
+Layer 5 opens, keeps, resumes, and closes a conversation between two programs. TCP/IP has no separate session layer. Programs and libraries do this work themselves, so this layer is the hardest to point at.
+
+Real examples:
+
+- TLS session resumption. A client that reconnects can reuse keys from an earlier session and skip most of the handshake.
+- HTTP/2 and HTTP/3 run many request streams inside one connection.
+- HTTP keep-alive and connection pools reuse one TCP connection for many requests.
+- SSH multiplexing (`ControlMaster`) runs many `ssh` and `scp` commands over one open SSH session.
+- RPC frameworks, SOCKS proxies, and SMB file sharing keep their own sessions.
+
+A login cookie is also called a "session", but it belongs to the application at layer 7.
+
+In Linux, layer 5 runs in user space, inside your program or its libraries.
 
 ```bash
-cl nc -zv 10.0.0.2 9999
-# nc: connect to 10.0.0.2 port 9999 (tcp) failed: Connection refused     ← instant, kernel sent RST
+openssl s_client -connect example.com:443 -tls1_2 -reconnect </dev/null 2>/dev/null | grep -E '^(New|Reused)'
+# New, TLSv1.2, Cipher is ECDHE-ECDSA-CHACHA20-POLY1305       ← first connection: full handshake
+# Reused, TLSv1.2, Cipher is ECDHE-ECDSA-CHACHA20-POLY1305    ← reconnects resume the session
 
-sv nft add table inet lab
-sv nft add chain inet lab input '{ type filter hook input priority 0; policy accept; }'
-sv nft add rule inet lab input tcp dport 9999 drop
-sv nft add rule inet lab input tcp dport 9998 reject with tcp reset
+curl -sv -o /dev/null -o /dev/null https://example.com/ https://example.com/ 2>&1 | grep -i 're-using'
+# * Re-using existing connection with host example.com        ← second request, no new handshake
 
-cl nc -zv -w 10 10.0.0.2 9999
-# hangs, then: nc: connect to 10.0.0.2 port 9999 (tcp) timed out          ← firewall dropped the SYN
-
-cl nc -zv 10.0.0.2 9998
-# Connection refused                                                       ← firewall forged the RST
+ssh -O check prod                       # is a shared SSH session open?
 ```
 
-Run `sv tcpdump -ni veth-s -ttt tcp port 9999` during the dropped test. `-ttt` prints the time between packets, and the SYN retries come at growing gaps of 1, 2, 4, and 8 seconds. Without `-w`, the kernel stops after `tcp_syn_retries` (6) retries, about 127 seconds in total.
+You work at layer 5 when:
 
-### 4. Add delay and loss
+- Every request pays for a new TCP and TLS handshake because the client does not reuse connections.
+- A load balancer sends each request of one session to a different backend. That needs "sticky sessions" or shared session storage.
+- Long-lived connections (WebSockets, database pools) die after an idle timeout on a proxy or NAT.
+
+### Layer 6: Presentation
+
+Layer 6 makes sure both sides read the bytes the same way. It covers encoding (UTF-8), serialization (JSON, Protocol Buffers), compression (gzip, Brotli), and encryption (TLS).
+
+In Linux, layer 6 also runs in user space, in libraries such as OpenSSL, zlib, and JSON parsers inside your program. The exception is kTLS, where the kernel encrypts the TLS records after the program finished the handshake.
 
 ```bash
-sv tc qdisc add dev veth-s root netem delay 50ms loss 2%   # slow, lossy cable from the server
-cl ping -c 3 10.0.0.2                                      # RTT is now about 50 ms
-cl curl -o /dev/null http://10.0.0.2:8080/blob             # note the speed
-
-sv ss -ti 'sport = :8080'                                  # run this during the download
-sv nstat -az TcpRetransSegs                                # total retransmitted segments
+openssl s_client -connect example.com:443 -servername example.com -brief </dev/null
+printf 'é' | od -An -tx1                 # c3 a9: the letter é as UTF-8 bytes
+printf '\xc3\xa9' | iconv -f latin1 -t utf-8   # Ã©: the same bytes read as Latin-1
+file data.bin                            # guess a file's format from its bytes
+curl -s --compressed -o /dev/null -w '%{size_download}\n' https://example.com
 ```
 
-`ss -ti` prints a line like this for each connection (trimmed, your numbers will differ):
-
 ```
-cubic wscale:7,7 rto:256 rtt:51.2/1.4 mss:1448 cwnd:14 ssthresh:12 ... retrans:0/37 ...
+$ openssl s_client -connect example.com:443 -servername example.com -brief </dev/null
+CONNECTION ESTABLISHED
+Protocol version: TLSv1.3
+Ciphersuite: TLS_AES_256_GCM_SHA384
+Peer certificate: CN = example.com
+Verification: OK
 ```
 
-| Field          | Meaning                                                  |
-| -------------- | -------------------------------------------------------- |
-| `cubic`        | Congestion control algorithm for this socket.            |
-| `rtt:51.2/1.4` | Smoothed round-trip time and its variation, in ms.       |
-| `rto:256`      | Current retransmission timeout, in ms.                   |
-| `cwnd:14`      | Congestion window, in segments.                          |
-| `ssthresh:12`  | Where slow start ended after the last loss.              |
-| `retrans:0/37` | Segments being retransmitted now / in total.             |
+You work at layer 6 when:
 
-Now compare:
+- Text shows `Ã©` instead of `é`. One side wrote UTF-8 and the other read Latin-1.
+- TLS fails with `certificate has expired` or a hostname mismatch.
+- You see `wrong version number` from OpenSSL. The client speaks TLS to a port that speaks plain HTTP.
+- An API returns `415 Unsupported Media Type`. You sent form data where it expects JSON.
+
+### Layer 7: Application
+
+Layer 7 is the protocol your program speaks: HTTP, DNS, SSH, SMTP, IMAP, MQTT, the PostgreSQL wire protocol. Addresses here are hostnames, URLs, paths, and email addresses.
+
+In Linux, layer 7 is ordinary programs and daemons: nginx, sshd, postfix, and systemd-resolved for DNS.
 
 ```bash
-sv tc qdisc change dev veth-s root netem delay 50ms loss 0%    # no loss: much faster
-sv tc qdisc change dev veth-s root netem delay 50ms loss 5%    # more loss: much slower
-
-sudo modprobe tcp_bbr
-sv sysctl -w net.ipv4.tcp_congestion_control=bbr               # only for the server namespace
-cl curl -o /dev/null http://10.0.0.2:8080/blob                 # usually far faster than cubic at 5% loss
+curl -v https://example.com             # DNS, TCP connect, TLS, then the HTTP request and response
+dig example.com                         # DNS question and answer
+resolvectl status                       # which DNS servers systemd-resolved uses
+ssh -v user@host                        # SSH negotiation step by step
+journalctl -u nginx -n 50               # logs of a layer 7 service
 ```
 
-CUBIC treats each loss as a full queue and cuts its window. With random loss and no real congestion, that cut is wrong. BBR does not read loss as congestion, so random loss slows it far less.
+`curl -v` walks through several layers in one command:
 
-### 5. Fill an accept queue (no root needed)
+```
+* Host example.com:443 was resolved.                       ← L7: DNS answered
+* Connected to example.com (172.66.147.243) port 443       ← L3 and L4: route found, TCP handshake done
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384    ← L5 and L6: TLS session and encryption
+* ALPN: server accepted h2                                 ← both sides agree to speak HTTP/2
+> GET / HTTP/2                                             ← L7: request
+< HTTP/2 200                                               ← L7: response
+```
+
+You work at layer 7 when:
+
+- `Could not resolve host`. DNS failed. Check `resolvectl status` and `dig`.
+- HTTP returns 4xx or 5xx. A `502 Bad Gateway` means the proxy reached layer 4 of its backend but got no valid HTTP back.
+- The wrong site answers. The `Host` header or the TLS SNI name does not match the server's configuration.
+
+## Devices, and the layer they work at
+
+| Layer | Devices and software                                                   | Linux equivalent                      |
+| ----- | ---------------------------------------------------------------------- | ------------------------------------- |
+| 1     | cable, hub, repeater, media converter                                  | none                                  |
+| 2     | switch, access point, bridge                                           | `ip link add br0 type bridge`         |
+| 3     | router, layer 3 switch                                                 | `sysctl net.ipv4.ip_forward=1`        |
+| 3, 4  | stateful firewall, cloud security group, NAT                           | nftables                              |
+| 4     | L4 load balancer (AWS NLB, IPVS)                                       | `ipvsadm`, HAProxy in `mode tcp`      |
+| 7     | reverse proxy, L7 load balancer (AWS ALB), WAF, API gateway            | nginx, HAProxy in `mode http`, Envoy  |
+
+One Linux machine can do all of these at once. A typical Docker host is a switch (bridges), a router (`ip_forward`), a firewall and NAT (nftables), and often a reverse proxy (nginx) too.
+
+### L4 or L7 load balancing
+
+This is one of the most common real decisions that uses OSI numbers.
+
+| L4 load balancer                                     | L7 load balancer                                      |
+| ---------------------------------------------------- | ----------------------------------------------------- |
+| Sees IP addresses and ports only                     | Reads the full HTTP request                           |
+| Works for any TCP or UDP protocol: databases, MQTT, game servers | Works for HTTP, gRPC, WebSocket              |
+| Passes TLS through, the backend holds the certificate | Ends TLS, the load balancer holds the certificate    |
+| Cannot route by URL, header, or cookie               | Routes by host, path, header, or cookie               |
+| Very little CPU per connection                       | More CPU, but can retry, cache, compress, and add headers |
+
+Pick L4 for non-HTTP traffic, or when the backend must see the original TLS connection. Pick L7 when you need path-based routing (`/api` to one service, `/` to another), one certificate for many backends, or HTTP-level retries and logs.
+
+## Troubleshoot from the bottom up
+
+When something does not connect, check the layers in order from 1 to 7. Stop at the first one that fails. A problem at a lower layer breaks everything above it.
 
 ```bash
-python3 -c 'import socket, time
-s = socket.socket(); s.bind(("127.0.0.1", 7000)); s.listen(2); time.sleep(60)' &   # listens, never accepts
-
-for i in 1 2 3 4 5 6; do nc 127.0.0.1 7000 </dev/null & done
-
-ss -ltn 'sport = :7000'
-ss -tan 'dport = :7000'
-nstat -az TcpExtListenOverflows
+ip -br link                                        # L1: is the interface UP with LOWER_UP?
+ip neigh show 192.168.1.1                          # L2: does the gateway answer ARP (REACHABLE)?
+ip route get 1.1.1.1 && ping -c 2 1.1.1.1          # L3: is there a route, and do packets come back?
+nc -zv example.com 443                             # L4: can a TCP connection open?
+openssl s_client -connect example.com:443 -brief </dev/null   # L5, L6: does TLS work?
+curl -v https://example.com                        # L7: does the application answer?
 ```
 
-Output on Linux 6.8:
+`curl -v` alone often shows which layer stopped, because it prints each stage before it fails.
 
-```
-State  Recv-Q Send-Q Local Address:Port Peer Address:Port
-LISTEN 3      2          127.0.0.1:7000      0.0.0.0:*
+Common error messages and their layer:
 
-State    Recv-Q Send-Q Local Address:Port  Peer Address:Port
-ESTAB    0      0          127.0.0.1:60736    127.0.0.1:7000
-ESTAB    0      0          127.0.0.1:60746    127.0.0.1:7000
-ESTAB    0      0          127.0.0.1:60758    127.0.0.1:7000
-SYN-SENT 0      1          127.0.0.1:60770    127.0.0.1:7000
-SYN-SENT 0      1          127.0.0.1:60784    127.0.0.1:7000
-SYN-SENT 0      1          127.0.0.1:60792    127.0.0.1:7000
-```
+| Message                                   | Layer | Meaning                                              |
+| ----------------------------------------- | ----- | ---------------------------------------------------- |
+| `NO-CARRIER` in `ip link`                 | 1     | No physical link.                                    |
+| `FAILED` in `ip neigh`                    | 2     | The host does not answer ARP.                        |
+| `Network is unreachable`                  | 3     | No route for that address.                           |
+| `No route to host`                        | 3     | Host does not answer ARP, or a firewall rejected with ICMP. |
+| `Connection timed out`                    | 3 or 4 | Packets are dropped somewhere on the path.          |
+| `Connection refused`                      | 4     | Nothing listens on that port.                        |
+| `wrong version number`                    | 6     | TLS client talking to a non-TLS port.                |
+| `certificate has expired`                 | 6     | Certificate problem.                                 |
+| `Could not resolve host`                  | 7     | DNS lookup failed.                                   |
+| `502 Bad Gateway`                         | 7     | The proxy got no valid answer from its backend.      |
 
-On a `LISTEN` socket, `Recv-Q` is the number of connections waiting in the accept queue and `Send-Q` is the backlog. Linux allows backlog + 1 entries, so three clients are `ESTAB` even though the program never called `accept()`. The other three stay in `SYN-SENT`, because the kernel drops their SYNs, and `ListenOverflows` counts up.
+## See layers 2 to 4 in one capture
 
-To see `CLOSE-WAIT`, connect to a server that closes first and never close your end:
+`tcpdump -e` prints the Ethernet header too, so one line shows three layers at once:
 
 ```bash
-python3 -m http.server 8765 --bind 127.0.0.1 &
-python3 -c 'import socket, time
-s = socket.create_connection(("127.0.0.1", 8765))
-s.send(b"GET / HTTP/1.0\r\n\r\n"); time.sleep(30)' &
-ss -tan '( sport = :8765 or dport = :8765 )'
-# CLOSE-WAIT 4460 0   127.0.0.1:53154  127.0.0.1:8765    ← our side: peer closed, we never did
-# FIN-WAIT-2 0    0   127.0.0.1:8765   127.0.0.1:53154   ← server side: waiting for our FIN
+sudo tcpdump -eni enp4s0 -c 3 'tcp port 443'      # terminal 1
+curl -s -o /dev/null https://example.com          # terminal 2
 ```
 
-### Clean up
-
-```bash
-sudo ip netns del client
-sudo ip netns del server        # also removes the veth pair, tc rules, and nft tables
-kill %1 %2 2>/dev/null; pkill -f 'nc 127.0.0.1 7000'
+```
+00:2b:67:61:2c:81 > d8:9a:0d:80:8f:f9, ethertype IPv4 (0x0800), length 74: 192.168.1.6.51234 > 172.66.147.243.443: Flags [S], seq 3542141823, win 64240, length 0
+└──────── L2: MAC addresses ────────┘  └───── L2: type ──────┘             └──────── L3: IPs, L4: ports ────────┘  └ L4: flags ┘
 ```
 
-## Troubleshooting by symptom
-
-| Symptom                                     | What you see                              | Cause and fix                                   |
-| ------------------------------------------- | ----------------------------------------- | ----------------------------------------------- |
-| "Connection refused" at once                | `RST` in `tcpdump`                        | Nothing listens on that port, or it listens on `127.0.0.1` only. Check `ss -ltn`. |
-| Connect hangs, then times out               | Client in `SYN-SENT`, repeated SYNs       | Something drops packets: firewall, security group, wrong route, host down. Run `tcpdump` on both ends. |
-| `CLOSE-WAIT` count keeps growing            | `ss -tan state close-wait`                | Your program never calls `close()`. Close sockets in `finally` or `defer`. |
-| Thousands of `TIME-WAIT`                    | `ss -tan state time-wait \| wc -l`        | Normal for the side that closes first. Only a problem if ephemeral ports run out. Reuse connections (keep-alive, pools). |
-| Clients time out under load                 | `LISTEN` `Recv-Q` at `Send-Q`, `ListenOverflows` rising | The program accepts too slowly. Add workers, raise `listen()` backlog and `net.core.somaxconn`. |
-| Small request-response is about 40 ms slow  | Gaps between small segments               | Nagle's algorithm plus delayed ACK. Set `TCP_NODELAY` on the socket. |
-| Idle connection dies after minutes          | `RST` or silence after idle time          | A NAT or load balancer forgot the connection. Enable keepalive with a shorter idle time, or send pings in the application. |
-| Low throughput on a long-distance link      | `cwnd` or `rwnd` small in `ss -ti`        | Window smaller than bandwidth × RTT. Check `wscale`, raise `tcp_rmem`/`tcp_wmem` max, try BBR. |
-
-The last row is the **bandwidth-delay product**. To fill 1 Gbit/s over 100 ms RTT, 12.5 MB must be in flight. With the default 6 MB maximum receive buffer, one connection tops out near 500 Mbit/s however fast the link is.
-
-## Sysctl cheat sheet
-
-Defaults from Ubuntu 24.04 with kernel 6.8. Read with `sysctl <name>`, change with `sysctl -w <name>=<value>`, make permanent in `/etc/sysctl.d/*.conf`.
-
-| Setting                          | Default            | Controls                                        |
-| -------------------------------- | ------------------ | ----------------------------------------------- |
-| `net.ipv4.tcp_congestion_control` | `cubic`           | Congestion control algorithm.                   |
-| `net.ipv4.tcp_syn_retries`       | `6`                | SYN retries before `connect()` fails (about 127 s). |
-| `net.ipv4.tcp_synack_retries`    | `5`                | SYN+ACK retries on the server side.             |
-| `net.ipv4.tcp_retries2`          | `15`               | Data retries before an established connection is dropped (about 15 min). |
-| `net.core.somaxconn`             | `4096`             | Maximum accept queue for any `listen()`.        |
-| `net.ipv4.tcp_max_syn_backlog`   | `1024`             | Maximum SYN queue.                              |
-| `net.ipv4.tcp_syncookies`        | `1`                | SYN cookies when the SYN queue overflows.       |
-| `net.ipv4.tcp_rmem`              | `4096 131072 6291456` | Receive buffer min, default, max (bytes).    |
-| `net.ipv4.tcp_wmem`              | `4096 16384 4194304`  | Send buffer min, default, max (bytes).       |
-| `net.ipv4.ip_local_port_range`   | `32768 60999`      | Ephemeral ports for outgoing connections.       |
-| `net.ipv4.tcp_tw_reuse`          | `2`                | Reuse `TIME-WAIT` ports for new outgoing connections. 2 = loopback only. |
-| `net.ipv4.tcp_fin_timeout`       | `60`               | How long an orphaned socket stays in `FIN-WAIT-2`. Does **not** change `TIME-WAIT`. |
-| `net.ipv4.tcp_keepalive_time`    | `7200`             | Idle seconds before the first keepalive probe.  |
-| `net.ipv4.tcp_keepalive_intvl`   | `75`               | Seconds between probes.                          |
-| `net.ipv4.tcp_keepalive_probes`  | `9`                | Failed probes before the connection is dropped. |
-
-Do not copy tuning lists from blog posts. Most defaults are right for most machines. Change one value when a measurement such as `nstat`, `ss -ti`, or a counter in `/proc/net/netstat` points at it.
+This line is shortened, and your ports and numbers will differ. The destination MAC is the router's (`d8:9a:0d:80:8f:f9` from `ip neigh`), while the destination IP is the web server's. Your machine sends the frame to the router at layer 2 and addresses the packet to the server at layer 3. Layer 7 is encrypted, so `tcpdump` cannot show the HTTP request.
 
 ## Summary
 
-1. TCP is layer 4. IP finds the machine, the port finds the program, and TCP makes the byte stream reliable.
-2. The handshake costs one round trip. Reuse connections.
-3. ACKs are cumulative. Lost segments are resent after duplicate ACKs or a timeout, and the data behind them waits.
-4. Sending speed is `min(rwnd, cwnd)`. The receiver limits `rwnd` and the network limits `cwnd`.
-5. TCP runs in the kernel. Your program only copies bytes in and out of socket buffers.
-6. A refusal is fast and means nothing listens. A timeout is slow and means something drops packets.
-7. A growing `CLOSE-WAIT` count means your program does not call `close()`. `TIME-WAIT` is normal unless you run out of ephemeral ports.
+1. OSI has seven layers. TCP/IP, which the internet runs, has four. People use the OSI numbers anyway.
+2. Each layer adds a header on the way down and removes it on the way up. Each device reads only the layers it needs.
+3. In Linux, the network card does layer 1. The kernel does layers 2 to 4. Your program does layers 5 to 7. The socket API is the line between the kernel and your program.
+4. MAC addresses change at every hop. IP addresses stay the same end to end, except where NAT rewrites them.
+5. Troubleshoot from layer 1 up. `ping` only proves layer 3, `nc -z` proves layer 4, and `curl -v` shows all of them.
 
 </div>
 
 <div data-lang="id">
 
-## Di mana TCP berada
+## Apa itu model OSI
 
-Jaringan bekerja dalam lapisan. Tiap lapisan mengerjakan satu tugas, menambahkan header-nya sendiri, lalu menyerahkan paketnya ke lapisan di bawahnya.
+Model OSI (Open Systems Interconnection) adalah model referensi yang diterbitkan ISO pada 1984. Model ini membagi komunikasi jaringan menjadi tujuh lapisan. Tiap lapisan mengerjakan satu tugas dan hanya berhubungan dengan lapisan tepat di atas dan di bawahnya.
+
+Internet tidak menjalankan protokol OSI. Internet menjalankan rangkaian TCP/IP, yang punya empat lapisan. Walaupun begitu, nomor lapisan OSI tetap dipakai setiap hari. "Switch L2", "load balancer L4", dan "firewall L7" semuanya merujuk ke lapisan OSI. Kalau ada yang bilang "ini masalah L3", maksudnya masalah routing atau alamat IP.
+
+Jembatan keledai untuk urutannya, dari layer 1 ke atas: **P**lease **D**o **N**ot **T**hrow **S**ausage **P**izza **A**way.
+
+## Tujuh lapisan sekilas
+
+| # | Lapisan      | Satuan data   | Alamat        | Contoh                            | Perangkat              | Yang menjalankan di Linux       |
+| - | ------------ | ------------- | ------------- | --------------------------------- | ---------------------- | ------------------------------- |
+| 7 | Application  | pesan         | URL, hostname | HTTP, DNS, SSH, SMTP              | proxy L7, WAF          | programmu (nginx, curl, sshd)    |
+| 6 | Presentation | pesan         | tidak ada     | enkripsi TLS, UTF-8, JSON, gzip   | tidak ada              | library di programmu (OpenSSL, zlib) |
+| 5 | Session      | pesan         | ID sesi       | sesi TLS, stream HTTP/2, RPC      | tidak ada              | library di programmu             |
+| 4 | Transport    | segment (TCP), datagram (UDP) | port | TCP, UDP                   | load balancer L4, firewall stateful | kernel (TCP, UDP, socket) |
+| 3 | Network      | paket         | alamat IP     | IPv4, IPv6, ICMP                  | router                 | kernel (routing, netfilter)      |
+| 2 | Data link    | frame         | alamat MAC    | Ethernet, Wi-Fi, VLAN, ARP        | switch, access point   | kernel dan driver (bridge, ARP)  |
+| 1 | Physical     | bit           | tidak ada     | tembaga, fiber, radio             | kabel, hub, repeater   | hardware kartu jaringan          |
+
+## OSI dan TCP/IP berdampingan
 
 ```
- Model OSI            Model TCP/IP        contoh
- ───────────────      ──────────────      ──────────────────────────
+ Model OSI            Model TCP/IP        yang benar-benar berjalan
+ ───────────────      ──────────────      ──────────────────────────────
  7 Application   ┐
- 6 Presentation  ├──► Application         HTTP, SSH, DNS, TLS
+ 6 Presentation  ├──► Application         HTTP, DNS, SSH, TLS, JSON
  5 Session       ┘
- 4 Transport     ───► Transport           TCP, UDP, QUIC (di atas UDP)  ◄── tulisan ini
+ 4 Transport     ───► Transport           TCP, UDP
  3 Network       ───► Internet            IP, ICMP
  2 Data link     ┐
  1 Physical      ┴──► Link                Ethernet, Wi-Fi, ARP
 ```
 
-TCP ada di layer 4, lapisan transport. IP (layer 3) memindahkan paket dari satu mesin ke mesin lain, tanpa janji paketnya sampai, sampai sekali saja, atau sampai berurutan. TCP berjalan di atas IP. TCP memberi nomor pada setiap byte, menunggu acknowledgment, dan mengirim ulang yang hilang, sehingga dua program mendapat aliran byte yang andal.
+TCP/IP menggabungkan layer 5, 6, dan 7 menjadi satu lapisan aplikasi, karena dalam praktiknya satu program mengerjakan ketiganya. TCP/IP juga menggabungkan layer 1 dan 2, karena satu kartu jaringan mengerjakan keduanya.
 
-Begini bentuk satu paket TCP di kabel Ethernet, dengan header tiap lapisan di depan datanya:
+Beberapa protokol tidak pas di satu lapisan. TLS mengenkripsi data (layer 6), menyimpan state sesi (layer 5), dan berjalan di dalam proses aplikasi (layer 7). ARP menerjemahkan alamat IP (layer 3) menjadi alamat MAC (layer 2). Pakai model ini untuk menemukan lokasi masalah, bukan untuk berdebat di lapisan mana sebuah protokol "seharusnya" berada.
 
-```
- ┌──────────┬──────────┬───────────┬──────────────────────────┬─────┐
- │ Ethernet │    IP    │    TCP    │        data kamu         │ FCS │
- │   14 B   │   20 B   │  20-60 B  │ sampai MSS, biasa 1460 B │ 4 B │
- └──────────┴──────────┴───────────┴──────────────────────────┴─────┘
-  kartu       mesin      program mana,
-  jaringan    mana       posisi di aliran
-```
+## Enkapsulasi: cara lapisan bertumpuk
 
-| Lapisan   | Alamat yang dipakai    | Pertanyaan yang dijawab           |
-| --------- | ---------------------- | --------------------------------- |
-| Link      | Alamat MAC             | Kartu jaringan mana di kabel atau Wi-Fi ini? |
-| Internet  | Alamat IP              | Mesin yang mana, di mana pun?     |
-| Transport | Nomor port             | Program mana di mesin itu?        |
-| Application | URL, hostname, path  | Apa arti pesannya?                |
-
-Yang dijanjikan TCP:
-
-- Setiap byte sampai, atau koneksi melaporkan error.
-- Byte sampai sesuai urutan kirim, tanpa duplikat.
-- Pengirim melambat saat penerima sibuk (flow control).
-- Pengirim melambat saat jaringan penuh (congestion control).
-
-Yang **tidak** diberikan TCP:
-
-- Batas pesan. Dua kali `write()` 100 byte bisa tiba sebagai satu `read()` 200 byte, atau 150 + 50. Protokolmu sendiri yang harus menandai akhir pesan (awalan panjang, newline, `Content-Length` di HTTP).
-- Latensi rendah saat ada paket hilang. Satu paket hilang menahan semua byte di belakangnya sampai pengirim mengirimnya ulang.
-- Keamanan. Siapa pun di jalur bisa membaca dan mengubah lalu lintas TCP. TLS, yang berjalan di atas TCP, menambahkan enkripsi.
-
-## Header TCP
+Saat program mengirim data, tiap lapisan dalam perjalanan turun menambahkan header miliknya di depan. Mesin penerima melepasnya dalam perjalanan naik, dengan urutan terbalik.
 
 ```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|          Source Port          |       Destination Port        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                        Sequence Number                        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     Acknowledgment Number                     |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  Data |       |C|E|U|A|P|R|S|F|                               |
-| Offset| Rsrvd |W|C|R|C|S|S|Y|I|            Window             |
-|       |       |R|E|G|K|H|T|N|N|                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|           Checksum            |         Urgent Pointer        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                    Options (0 to 40 bytes)                    |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ L7  Application                            [ GET / HTTP/1.1 ]
+ L6  Presentation                   [ TLS │ HTTP terenkripsi ]
+ L5  Session                        (byte yang sama, di dalam sesi TLS yang terbuka)
+ L4  Transport                [ TCP │ TLS │ HTTP terenkripsi ]
+ L3  Network             [ IP │ TCP │ TLS │ HTTP terenkripsi ]
+ L2  Data link    [ ETH │ IP │ TCP │ TLS │ HTTP terenkripsi │ FCS ]
+ L1  Physical     10110001011101001010101110101001010...
 ```
 
-| Field              | Arti                                                               |
-| ------------------ | ------------------------------------------------------------------ |
-| Source / Destination Port | Masing-masing 16 bit, jadi 0 sampai 65535. Menentukan program. |
-| Sequence Number    | Posisi byte data pertama di segmen ini, dihitung per byte.         |
-| Acknowledgment Number | "Aku sudah punya semua byte sebelum ini. Kirim yang ini berikutnya." |
-| Data Offset        | Panjang header dalam word 32 bit (5 = 20 byte, 15 = 60 byte).      |
-| `SYN`              | "Ayo mulai. Nomor urut pertamaku ini."                             |
-| `ACK`              | Nomor acknowledgment berlaku. Ada di hampir semua paket setelah yang pertama. |
-| `FIN`              | "Aku tidak punya data lagi untuk dikirim."                         |
-| `RST`              | "Koneksi ini tidak ada. Berhenti." Langsung memutus.               |
-| `PSH`              | "Serahkan ke aplikasi sekarang." Biasanya ada di segmen terakhir dari satu write. |
-| `ECE` / `CWR`      | Explicit Congestion Notification, router memberi tanda alih-alih membuang paket. |
-| Window             | Berapa byte lagi yang masih bisa ditampung penerima saat ini.      |
-| Checksum           | Mendeteksi segmen rusak. Segmen rusak dibuang diam-diam.           |
-| Options            | Disepakati di SYN: `mss`, `wscale`, `sackOK`, timestamp.           |
-
-Field window cuma 16 bit (maksimal 64 KB), terlalu kecil untuk link cepat. Opsi window scale (`wscale 7` artinya dikali 2^7 = 128) mengatasinya. Keempat opsi ini selalu terlihat di `tcpdump` setiap SYN.
-
-## Port, socket, dan 4-tuple
-
-Satu koneksi TCP dikenali dari empat nilai:
-
-```
- (IP sumber, port sumber, IP tujuan, port tujuan)
-  10.0.0.1   51234        10.0.0.2   443
-```
-
-Sisi server tetap (`10.0.0.2:443`). Port klien adalah **port ephemeral** yang dipilih kernel dari `net.ipv4.ip_local_port_range` (bawaannya 32768 sampai 60999). Karena salah satu dari empat nilai itu bisa berbeda, satu port server bisa menampung ratusan ribu koneksi sekaligus. Setiap koneksi punya socket sendiri.
-
-Socket adalah objek kernel untuk satu ujung koneksi. Bagi programmu, socket hanyalah file descriptor, bilangan bulat kecil seperti `3`.
-
-## Membuka koneksi: three-way handshake
-
-```
-   klien                                           server
- (CLOSED)                                        (LISTEN)
-    │ ── SYN  seq=1000 ──────────────────────────────► │
- SYN-SENT                                     SYN-RECEIVED
-    │ ◄──────────────────── SYN+ACK seq=5000 ack=1001 │
- ESTABLISHED                                          │
-    │ ── ACK  ack=5001 ──────────────────────────────► │
-    │                                           ESTABLISHED
-```
-
-1. Klien mengirim `SYN` dengan **initial sequence number** (ISN) acak. ISN dibuat acak supaya penyerang tidak bisa menebaknya lalu menyisipkan paket palsu.
-2. Server membalas `SYN+ACK` dengan ISN miliknya. `ack=1001` artinya "byte 1000-mu sudah kuterima". SYN dihitung satu byte walaupun tidak membawa data.
-3. Klien mengirim `ACK`. Kedua sisi sekarang `ESTABLISHED`.
-
-Tiap sisi punya nomor urut sendiri, karena satu koneksi TCP sebenarnya dua aliran byte terpisah, satu untuk tiap arah. Handshake memakan satu round trip sebelum data apa pun bergerak. Di link 100 ms, itu 100 ms menunggu, dan TLS menambah minimal satu round trip lagi. Memakai ulang koneksi (HTTP keep-alive, connection pool) menghapus waktu tunggu itu untuk setiap request setelah yang pertama.
-
-## Mengirim data: sequence number, ACK, dan window
-
-```
- klien                                    server
-   │ ── seq=1001 len=1000 ──────────────────► │
-   │ ── seq=2001 len=1000 ──────────────────► │
-   │ ◄─────────────────────────── ack=3001 ── │   "aku punya semuanya sampai 3000"
-```
-
-ACK bersifat kumulatif. `ack=3001` mengonfirmasi semua byte sebelum 3001, jadi satu ACK bisa mencakup banyak segmen. Linux juga sedikit menunda ACK dan mengakui tiap dua segmen sekali, sehingga lalu lintas ACK berkurang setengah.
-
-Pengirim boleh punya data belum di-ACK sebanyak ini di jalan:
-
-```
- di jalan ≤ min(rwnd, cwnd)
-            │      └── congestion window: tebakan pengirim tentang kapasitas JARINGAN
-            └── receive window: kapasitas buffer yang diumumkan PENERIMA (field Window)
-```
-
-**Flow control** (`rwnd`) melindungi penerima. Kalau programmu berhenti memanggil `read()`, buffer penerimaan penuh, window yang diumumkan turun ke 0, dan pengirim berhenti. Ini disebut "zero window", dan `tcpdump` menampilkannya sebagai `win 0`.
-
-**Congestion control** (`cwnd`) melindungi jaringan. Koneksi baru mulai dengan `cwnd` = 10 segmen (sekitar 14 KB), lalu kira-kira menggandakannya tiap round trip (slow start) sampai terjadi kehilangan paket. Setelah itu ia mundur dan naik pelan-pelan. Linux memakai CUBIC sebagai bawaan. BBR adalah pilihan umum lainnya. BBR mengukur bandwidth dan RTT alih-alih menganggap setiap paket hilang sebagai kemacetan, sehingga kecepatannya tetap tinggi di link jauh atau link yang sering kehilangan paket.
-
-```bash
-sysctl net.ipv4.tcp_congestion_control             # cubic
-sysctl net.ipv4.tcp_available_congestion_control   # reno cubic (bbr setelah modprobe tcp_bbr)
-```
-
-### Saat paket hilang
-
-TCP tahu ada paket hilang lewat dua cara:
-
-- **Duplicate ACK.** Penerima terus mengirim nomor `ack` yang sama, karena ada satu segmen yang hilang dan ia tidak bisa meng-ACK melewatinya. Setelah tiga duplikat, pengirim langsung mengirim ulang segmen yang hilang. Ini **fast retransmit**. Opsi SACK memberi tahu pengirim blok mana saja yang sudah sampai, jadi yang dikirim ulang hanya yang hilang. Linux modern juga memakai RACK, yang mendeteksi kehilangan berdasarkan waktu ("segmen yang dikirim setelah ini sudah lama di-ACK") alih-alih menghitung duplikat.
-- **Retransmission timeout (RTO).** Kalau tidak ada ACK sama sekali, timer berbunyi. RTO dihitung dari RTT yang terukur, minimal 200 ms di Linux, dan 1 detik sebelum RTT diketahui. Setiap timeout menggandakan waktu tunggu.
-
-Aplikasi tidak melihat semua ini. Ia hanya melihat `read()` sedikit lebih lama.
-
-## Menutup koneksi: FIN, TIME-WAIT, dan RST
-
-```
-   klien (menutup duluan)                          server
- ESTABLISHED                                    ESTABLISHED
-    │ ── FIN  seq=1101 ──────────────────────────────► │
- FIN-WAIT-1                                     CLOSE-WAIT   ◄── read() di server mengembalikan 0
-    │ ◄───────────────────────────────── ACK ack=1102 │
- FIN-WAIT-2                                           │      (server masih boleh mengirim)
-    │ ◄───────────────────────────────── FIN seq=5301 │      ◄── aplikasi server memanggil close()
- TIME-WAIT                                       LAST-ACK
-    │ ── ACK  ack=5302 ──────────────────────────────► │
-    │    (menunggu 60 dtk)                        CLOSED
- CLOSED
-```
-
-Tiap arah ditutup sendiri-sendiri, jadi penutupan normal butuh empat paket. Sisi yang mengirim `FIN` duluan disebut **active closer**, dan sisi inilah yang berakhir di `TIME-WAIT`.
-
-`TIME-WAIT` berlangsung 60 detik di Linux, angka yang ditanam di kode kernel. Ada dua alasannya. Kalau `ACK` terakhir hilang, lawan bicara mengirim ulang `FIN`-nya, dan sisi yang menutup duluan harus masih mengingat koneksinya untuk meng-ACK-nya lagi. Selain itu, `TIME-WAIT` mencegah paket telat dari koneksi ini nyasar ke koneksi baru yang memakai 4-tuple yang sama.
-
-`RST` memutus koneksi seketika, tanpa urutan penutupan. Kernel mengirimnya ketika:
-
-- SYN datang ke port yang tidak ada yang listen, programmu melihatnya sebagai "Connection refused",
-- paket datang untuk koneksi yang tidak dikenal kernel, misalnya setelah reboot,
-- program memanggil `close()` padahal masih ada data belum dibaca di buffer penerimaannya,
-- aturan firewall berbunyi `reject with tcp reset`.
-
-## State machine
-
-```
-                     connect() / kirim SYN
-           ┌──────────────────────────────────────► SYN-SENT ──────────────┐
-           │                                                               │ terima SYN+ACK
-       CLOSED                                                              │ kirim ACK
-           │  listen()               terima SYN                            ▼
-           └─────────────► LISTEN ─────────────► SYN-RECEIVED ──────► ESTABLISHED
-                                   kirim SYN+ACK           terima ACK      │
-                                                                           │
-            kita menutup duluan:  FIN-WAIT-1 ──► FIN-WAIT-2 ──► TIME-WAIT ──(60 dtk)──► CLOSED
-            lawan menutup duluan: CLOSE-WAIT ──(close() kita)──► LAST-ACK ──► CLOSED
-```
-
-| State          | Arti                                         | Waspada kalau                               |
-| -------------- | -------------------------------------------- | ------------------------------------------- |
-| `LISTEN`       | Socket server menunggu SYN.                   | Tidak ada. Tidak ada yang menerima koneksi. |
-| `SYN-SENT`     | Klien sudah kirim SYN, belum ada jawaban.     | Bertahan lama. Ada yang membuang SYN-mu.    |
-| `SYN-RECEIVED` | Server terima SYN, kirim SYN+ACK, tunggu ACK. | Ada ribuan. Mungkin SYN flood.              |
-| `ESTABLISHED`  | Terbuka, data bisa mengalir dua arah.         | Tidak pernah, ini keadaan normal.           |
-| `FIN-WAIT-1/2` | Kita sudah menutup, menunggu lawan menutup.   | Banyak `FIN-WAIT-2`. Lawan tidak pernah menutup sisinya. |
-| `CLOSE-WAIT`   | Lawan sudah menutup, **program kita belum memanggil `close()`**. | Terus bertambah. Ini bug di kodemu. |
-| `LAST-ACK`     | Kita menutup setelah lawan, menunggu ACK-nya. | Jarang jadi masalah.                        |
-| `TIME-WAIT`    | Kita menutup duluan, menunggu 60 detik.       | Hanya kalau port ephemeral habis.           |
-
-`ss -tan` menampilkan state ini. `ss` menulis `ESTABLISHED` sebagai `ESTAB` dan `SYN-RECEIVED` sebagai `SYN-RECV`.
+Tiap lapisan hanya membaca header miliknya dan menganggap sisanya sebagai muatan. Switch membaca header Ethernet dan tidak lebih. Router membaca header IP. Hanya program penerima yang membaca request HTTP-nya. Karena itu kamu bisa pindah dari Wi-Fi ke Ethernet (layer 1 dan 2) tanpa mengganti browser (layer 7).
 
 ## Simulasi
 
-Pilih skenario lalu jalankan langkah demi langkah. Setiap panah adalah satu paket. Kotak menunjukkan state TCP tiap sisi setelah paket itu, dan panel bawah menunjukkan kira-kira apa yang akan dicetak `tcpdump`.
+Pilih skenario lalu jalankan langkah demi langkah. Dua tumpukan itu adalah mesin pengirim dan penerima, kolom tengah adalah perangkat di antaranya, dan bar di bawah menunjukkan bentuk paket pada saat itu. Setiap blok berwarna adalah header satu lapisan.
 
-<div class="tcp-sim" data-sim-lang="id"></div>
+<div class="osi-sim" data-sim-lang="id"></div>
 
 Yang perlu diperhatikan:
 
-- Di skenario normal, tidak ada kode aplikasi yang berjalan selama handshake. Kedua kernel menyelesaikannya sebelum `accept()` kembali.
-- Di skenario paket hilang, server sudah memegang segmen 3 sampai 5 tetapi belum bisa memberikannya ke aplikasi sampai klien mengirim ulang segmen 2. Ini **head-of-line blocking**.
-- Skenario ditolak gagal dalam satu round trip. Skenario dibuang butuh sekitar dua menit. Kalau koneksi menggantung alih-alih langsung gagal, cari firewall yang membuang paket.
+- Di skenario HTTPS, switch hanya membaca header Ethernet, dan router hanya membaca sampai header IP. Keduanya tidak bisa melihat request HTTP, karena TLS sudah mengenkripsinya di layer 6.
+- Router membuat header Ethernet baru untuk link berikutnya. Alamat MAC berganti di setiap hop, sedangkan alamat IP tetap sama (kecuali di tempat NAT menulis ulang).
+- Di skenario ping, tidak ada yang berjalan di atas layer 3. Kernel router menjawab sendiri. Ping yang berhasil hanya membuktikan layer 1 sampai 3.
+- Di skenario DNS, UDP mengirim pertanyaan di paket pertama tanpa handshake. Kalau paket itu hilang, kernel tidak mengirim ulang. Program resolver yang mencoba lagi.
 
-## TCP berjalan di kernel
+## Letak tiap lapisan di Linux
 
-Programmu tidak pernah membuat paket TCP. TCP berjalan di dalam kernel sistem operasi. Programmu meminta socket ke kernel, lalu membaca dan menulis byte lewat system call. Kernel yang mengurus sequence number, ACK, timer, retransmisi, dan congestion control.
-
-```python
-import socket
-
-srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)    # socket(): file descriptor baru
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # bisa restart walau socket lama masih TIME-WAIT
-srv.bind(("0.0.0.0", 9000))                                # bind(): klaim port 9000
-srv.listen(128)                                            # listen(): kernel kini menjawab SYN sendiri
-
-while True:
-    conn, addr = srv.accept()   # accept(): ambil satu handshake yang sudah selesai dari accept queue
-    data = conn.recv(4096)      # recv(): salin byte dari buffer penerimaan kernel
-    conn.sendall(data)          # send(): salin byte ke buffer pengiriman kernel
-    conn.close()                # close(): kernel mengirim FIN
+```
+            ┌───────────────────────────────────────────┐
+ L7         │ programmu: nginx, curl, sshd, browser     │
+ L6         │ library: OpenSSL, zlib, parser JSON       │   user space
+ L5         │ sesi TLS, stream HTTP/2                   │
+            ├──────── socket API (system call) ─────────┤ ◄── socket(), connect(), read(), write()
+ L4         │ TCP, UDP                                  │
+ L3         │ IP, tabel routing, netfilter (nftables)   │   kernel
+ L2         │ ARP, bridge, VLAN, qdisc, driver          │
+            ├───────────────────────────────────────────┤
+ L1 (+L2)   │ kartu jaringan: PHY, MAC, checksum, DMA   │   hardware
+            └───────────────────────────────────────────┘
 ```
 
-| System call       | Yang dikirim ke kabel      | Yang dikerjakan kernel                                     |
-| ----------------- | -------------------------- | ---------------------------------------------------------- |
-| `socket()`        | tidak ada                  | Membuat socket dan mengembalikan file descriptor.          |
-| `bind()`          | tidak ada                  | Memesan alamat dan port, atau gagal dengan `EADDRINUSE`.   |
-| `listen(backlog)` | tidak ada                  | Menandai socket `LISTEN` dan menentukan ukuran accept queue. |
-| `connect()`       | SYN, lalu ACK              | Menjalankan handshake. Kembali saat `ESTABLISHED`, atau gagal dengan `ECONNREFUSED` atau `ETIMEDOUT`. |
-| `accept()`        | tidak ada                  | Mengambil koneksi yang sudah jadi dari accept queue dan memberi descriptor baru. |
-| `write()` / `send()` | data, sekarang atau nanti | Menyalin byte ke buffer pengiriman lalu kembali. Hanya blok saat buffer penuh. |
-| `read()` / `recv()` | kadang update window    | Menyalin byte dari buffer penerimaan. Mengembalikan 0 setelah lawan mengirim FIN. |
-| `shutdown(SHUT_WR)` | FIN                      | Menutup arah kirim saja. Kamu masih bisa membaca.          |
-| `close()`         | FIN, atau RST kalau masih ada data belum dibaca | Melepas descriptor. Kernel menyelesaikan penutupan di belakang layar. |
+Socket API adalah garis pemisah antarlapisan. Semua yang ada di layer 4 ke bawah berjalan di kernel dan kartu jaringan. Semua yang ada di layer 5 ke atas berjalan di dalam programmu. Programmu tidak pernah membuat header IP atau TCP. Programmu memanggil `write()` pada socket, lalu kernel yang mengerjakan layer 4 sampai 2.
 
-`write()` yang sukses hanya berarti kernel sudah menyalin byte-mu. Itu tidak berarti lawan sudah menerimanya. Kalau lawan crash sedetik kemudian, kamu baru tahu di `write()` atau `read()` berikutnya.
+Pembagian ini menjelaskan beberapa hal sehari-hari di Linux:
 
-Kamu bisa melihat panggilan ini dengan `strace`:
+- Mengubah rute, aturan firewall, atau interface butuh root, karena semua itu ada di kernel. Menjalankan web server di port 8080 tidak butuh root.
+- Port di bawah 1024 butuh root atau `CAP_NET_BIND_SERVICE`. Kernel menerapkan aturan ini di layer 4 (`net.ipv4.ip_unprivileged_port_start = 1024`).
+- `ping` jalan tanpa root di distribusi modern, karena kernel menyediakan socket ICMP tanpa hak khusus (`net.ipv4.ping_group_range`).
+- Container Docker memakai kernel host, jadi kode layer 2 sampai 4-nya sama. Container mendapat interface, rute, dan socket sendiri lewat network namespace.
+
+Beberapa alat memindahkan pekerjaan melewati garis itu:
+
+| Alat       | Yang dipindahkan                                                      |
+| ---------- | --------------------------------------------------------------------- |
+| kTLS       | Enkripsi TLS (layer 6) ke dalam kernel, supaya nginx bisa `sendfile()` lewat HTTPS. Muat dengan `modprobe tls`. |
+| QUIC       | Pengiriman andal (pekerjaan layer 4) ke dalam program, di atas UDP. HTTP/3 memakainya. |
+| TUN / TAP  | Interface virtual yang menyerahkan paket layer 3 (TUN) atau frame layer 2 (TAP) ke sebuah program. VPN seperti OpenVPN dan Tailscale memakai TUN. |
+| XDP / eBPF | Program kecil yang berjalan di driver sebelum kode layer 2 dan 3 milik kernel, dipakai untuk menyaring paket dengan cepat. |
+| DPDK       | Program mengambil alih kartu jaringan dan menjalankan layer 2 sampai 4 sendiri, untuk laju paket yang sangat tinggi. |
+
+Sistem operasi lain membagi pekerjaan dengan cara yang sama, hanya namanya berbeda:
+
+| Lapisan      | Linux                       | Windows                       | macOS                              |
+| ------------ | --------------------------- | ----------------------------- | ---------------------------------- |
+| L1, L2       | driver (`r8169`, `iwlwifi`) | driver NDIS miniport          | driver DriverKit / IOKit           |
+| L3, L4       | net stack kernel            | `tcpip.sys`                   | kernel XNU, stack turunan BSD      |
+| batas        | BSD sockets                 | Winsock                       | BSD sockets, Network.framework     |
+| L6 (TLS)     | OpenSSL, GnuTLS, kTLS       | Schannel                      | Network.framework                  |
+| L7           | programmu                   | programmu                     | programmu                          |
+
+Protokol di kabel sama di mana-mana, jadi laptop Windows dan server Linux bisa bicara tanpa perlakuan khusus.
+
+## Lapisan demi lapisan
+
+### Layer 1: Physical
+
+Layer 1 memindahkan bit mentah sebagai tegangan di kabel tembaga, cahaya di fiber, atau gelombang radio. Layer ini tidak tahu apa pun soal alamat. Ia menentukan kecepatan link (100 Mbit/s, 1 Gbit/s, 10 Gbit/s), duplex, konektor, dan jenis kabel.
+
+Kartu jaringan yang mengerjakannya. Linux hanya membaca hasilnya lewat driver.
 
 ```bash
-strace -e trace=socket,connect,sendto,recvfrom python3 -c '
-import socket
-s = socket.create_connection(("127.0.0.1", 8765))
-s.sendall(b"GET / HTTP/1.0\r\n\r\n")
-s.recv(100)'
+ip -br link                               # UP, DOWN, atau NO-CARRIER untuk tiap interface
+cat /sys/class/net/enp4s0/carrier         # 1 = kabel tercolok dan link menyala
+cat /sys/class/net/enp4s0/speed           # 1000 = 1 Gbit/s
+sudo ethtool enp4s0                       # kecepatan, duplex, "Link detected: yes"
+ip -s link show enp4s0                    # counter paket, error, dan drop
+dmesg -T | grep -i 'link is'              # "Link is Up - 1Gbps/Full"
+iw dev wlan0 link                         # kekuatan sinyal dan bitrate Wi-Fi
 ```
 
 ```
-socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_TCP) = 3
-connect(3, {sa_family=AF_INET, sin_port=htons(8765), sin_addr=inet_addr("127.0.0.1")}, 16) = 0
-sendto(3, "GET / HTTP/1.0\r\n\r\n", 18, 0, NULL, 0) = 18
-recvfrom(3, "HTTP/1.0 200 OK\r\nServer: SimpleH"..., 100, 0, NULL, NULL) = 100
+$ ip -s link show enp4s0
+3: enp4s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000
+    link/ether 00:2b:67:61:2c:81 brd ff:ff:ff:ff:ff:ff
+    RX:  bytes packets errors dropped  missed   mcast
+     342006120  446999      0     386       0    6821
+    TX:  bytes packets errors dropped carrier collsns
+     191352187  347042      0       0       0       0
 ```
 
-Angka `3` adalah file descriptor. Bagi Linux socket adalah file, jadi `ls -l /proc/<pid>/fd` menampilkannya sebagai `socket:[123456]`, dan `ss -tp` memetakannya kembali ke prosesnya.
+`LOWER_UP` artinya kartu melihat ada link. `UP` saja hanya berarti seseorang sudah menjalankan `ip link set up`.
 
-### Dua antrean di balik `listen()`
+Kamu berurusan dengan layer 1 kalau:
 
-```
-             SYN                         ACK terakhir                    accept()
- klien ────────────► SYN queue ─────────────────────► accept queue ─────────────► programmu
-                     koneksi setengah jadi            handshake selesai
-                     (tcp_max_syn_backlog)            batas: min(backlog, net.core.somaxconn)
-```
+- `ip link` menampilkan `NO-CARRIER`. Kabel tercabut, rusak, atau port switch-nya mati.
+- Link berjalan di 100 Mbit/s, bukan 1 Gbit/s. Sering kali satu pasang kabel di dalamnya rusak.
+- `errors` di `ip -s link` terus naik. Kabel jelek, port jelek, atau interferensi.
+- Wi-Fi lambat dan `iw` menunjukkan sinyal lemah (lebih buruk dari sekitar -70 dBm).
 
-Kernel tetap menyelesaikan handshake walaupun programmu sedang sibuk. Koneksi yang sudah jadi menunggu di accept queue sampai `accept()` mengambilnya. Kalau accept queue penuh, Linux membuang ACK terakhir dan SYN baru, dan klien tertahan di `SYN-SENT` sambil mencoba ulang. `nstat` menghitung kejadian ini sebagai `TcpExtListenOverflows`. Saat ada SYN flood, SYN cookies (`net.ipv4.tcp_syncookies = 1`) membuat server bisa menjawab tanpa menyimpan apa pun di SYN queue.
+### Layer 2: Data link
 
-### Perjalanan satu paket di Linux
+Layer 2 memindahkan frame antarmesin di jaringan lokal yang sama, artinya switch yang sama atau Wi-Fi yang sama. Alamatnya adalah alamat MAC 48 bit yang tertanam di tiap kartu jaringan.
 
-```
-          MENGIRIM                                        MENERIMA
- user     write(fd, buf)                                  read(fd, buf)
- ─────────────│─────────────────── syscall ─────────────────────▲─────────────
- kernel       ▼                                                 │
-        buffer kirim socket (tcp_wmem)              buffer terima socket (tcp_rmem)
-              ▼                                                 ▲
-        TCP: potong jadi segmen, seq,               TCP: cek seq, urutkan ulang,
-             cwnd, timer retransmisi                     kirim ACK, update window
-              ▼                                                 ▲
-        IP: pilih rute, tambah header IP            IP: paket ini untukku?
-              ▼                                                 ▲
-        netfilter: output, postrouting              netfilter: prerouting, input
-              ▼                                                 ▲
-        qdisc (tc): antre, shaping, delay           GRO: gabungkan segmen kecil
-              ▼                                                 ▲
-        driver ──► NIC ──► kabel ══════════════════► NIC ──► interrupt, NAPI poll
-```
+Frame Ethernet berisi MAC tujuan, MAC sumber, field tipe (`0x0800` untuk IPv4, `0x86DD` untuk IPv6, `0x0806` untuk ARP), muatan, dan checksum 4 byte (FCS) di akhir. Muatan terbesar adalah MTU, biasanya 1500 byte.
 
-- netfilter adalah tempat aturan nftables berjalan. Aturan `drop` di sana tidak mengirim balasan apa pun, jadi `connect()` menggantung sampai timeout. Lihat tulisan nftables untuk hook-hook-nya.
-- qdisc adalah antrean kirim. `tc` mengaturnya, dan `netem` bisa menambahkan delay dan kehilangan paket palsu di sana. Lab di bawah memakainya.
-- Offload (TSO, GSO, GRO) membuat kernel cukup memberi kartu jaringan satu potongan 64 KB, lalu kartunya yang memotong jadi segmen 1460 byte. Karena itu `tcpdump` kadang menampilkan "paket" yang jauh lebih besar dari MTU. `ethtool -k eth0` menampilkan daftarnya.
+Switch mempelajari alamat MAC mana yang ada di balik port mana, lalu mengirim tiap frame hanya ke port itu. ARP mencari alamat MAC untuk sebuah alamat IP di jaringan lokal. Satu mesin menyiarkan "siapa yang punya 192.168.1.1?" dan pemiliknya membalas dengan MAC-nya. VLAN (802.1Q) menambahkan tag ke frame supaya satu switch fisik bisa bertindak seperti beberapa switch terpisah.
 
-Kernel memperlihatkan isi TCP-nya di beberapa tempat:
+Di Linux, driver dan kernel yang mengerjakan layer 2. Kernel menyimpan tabel ARP, dan bisa bertindak sebagai switch. `docker0` dan setiap interface `br-*` adalah switch software (bridge), dan tiap container dicolokkan ke salah satunya dengan pasangan `veth`.
 
 ```bash
-ss -tan                        # semua socket TCP dan state-nya
-ss -ti                         # plus detail: rtt, cwnd, retransmisi
-nstat -az | grep -i tcp        # counter TCP kernel (retransmisi, drop, reset)
-cat /proc/net/tcp              # tabel socket mentah yang dibaca ss (hex)
-sysctl -a | grep net.ipv4.tcp  # semua kenop pengaturan
+ip link show enp4s0                     # link/ether = MAC-mu, mtu = muatan terbesar
+ip neigh                                # tabel ARP: IP ke MAC untuk mesin di LAN-mu
+sudo arping -I enp4s0 192.168.1.1       # kirim request ARP langsung
+sudo tcpdump -eni enp4s0 arp            # -e mencetak alamat MAC
+bridge link                             # interface mana tercolok ke bridge mana
+ip -d link show docker0                 # -d menunjukkan bahwa ini bridge
+sudo ip link add link enp4s0 name enp4s0.10 type vlan id 10   # VLAN 10 di atas enp4s0
 ```
 
-### Linux dan sistem operasi lain
+```
+$ ip neigh
+192.168.1.1 dev enp4s0 lladdr d8:9a:0d:80:8f:f9 REACHABLE
+172.19.0.2 dev br-68d019f1085b lladdr 06:79:9a:ff:17:c3 REACHABLE
+172.22.0.2 dev br-3325c98c3499 lladdr f6:49:01:ca:f3:93 STALE
+```
 
-Linux, Windows, macOS, dan keluarga BSD masing-masing punya kode TCP sendiri. Semuanya menyediakan Berkeley sockets API yang sama (`socket`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`). Karena itu program Python atau Go yang sama bisa berjalan di semuanya tanpa diubah.
+Baris pertama adalah router rumah. Dua lainnya adalah container Docker di balik bridge software.
 
-| OS      | Lokasi TCP                            | Cara mengaturnya                  |
-| ------- | ------------------------------------- | --------------------------------- |
-| Linux   | kernel, `net/ipv4/tcp*.c`             | `sysctl net.ipv4.tcp_*`, `ss`, `tc` |
-| Windows | driver kernel `tcpip.sys`, Winsock API | `netsh int tcp`, PowerShell `Get-NetTCPConnection` |
-| macOS   | kernel XNU, stack turunan BSD         | `sysctl net.inet.tcp.*`, `netstat` |
+Kamu berurusan dengan layer 2 kalau:
 
-Protokol di kabel sama di mana-mana, jadi klien Windows bisa bicara dengan server Linux tanpa perlakuan khusus. Yang berbeda adalah nilai bawaan, seperti window awal, panjang TIME-WAIT, dan timer keepalive. Windows dan macOS juga memakai CUBIC sebagai bawaan.
+- `ip neigh` menampilkan `FAILED` atau `INCOMPLETE` untuk gateway-mu. Tidak ada yang bisa dijangkau di luar LAN.
+- Dua mesin punya IP yang sama. Jawaban ARP berganti-ganti antara dua MAC, dan koneksi putus secara acak.
+- Paket kecil lancar tetapi paket besar menggantung. SSH bisa login, lalu macet saat `ls` di direktori besar. Ada MTU yang lebih kecil di jalur, sering kali VPN atau tunnel.
+- Kamu mencolokkan satu kabel ke dua port di switch yang sama dan jaringan mati. Loop itu membuat broadcast berputar terus, kecuali switch-nya menjalankan Spanning Tree.
 
-Ada dua pengecualian yang melewati TCP milik kernel. QUIC (dipakai HTTP/3) berjalan di proses aplikasi itu sendiri di atas UDP, jadi browser bisa merilis versi baru tanpa menunggu update OS. Library kernel-bypass seperti DPDK menjalankan stack TCP di user space untuk laju paket yang sangat tinggi.
+### Layer 3: Network
 
-## Kapan memakai TCP, dan kapan tidak
+Layer 3 memindahkan paket antarjaringan, melintasi seluruh internet, satu router demi satu router. Alamatnya adalah alamat IP ditambah subnet mask, yang menentukan alamat mana yang lokal.
 
-| Pakai TCP kalau                              | Pakai UDP kalau                                 |
-| -------------------------------------------- | ----------------------------------------------- |
-| Setiap byte penting: file, halaman web, API  | Data telat tidak berguna: suara, video call, game |
-| Urutan penting: query database, sesi SSH     | Pesan kecil dan berdiri sendiri: DNS, NTP       |
-| Kamu ingin OS yang mengurus pengiriman ulang | Kamu perlu mengirim ke banyak host sekaligus (multicast) |
-| Koneksi berumur panjang: HTTP/1.1, HTTP/2, gRPC | Kamu membangun keandalan sendiri, seperti QUIC |
+Setiap router membaca IP tujuan, mencarinya di tabel routing, lalu mengirim paket ke router berikutnya. Tiap router mengurangi TTL (time to live) satu. Saat TTL mencapai 0, router membuang paket dan mengirim balik pesan ICMP "time exceeded". `traceroute` memanfaatkan ini untuk menemukan setiap router di jalur. ICMP juga membawa `ping` dan pesan error seperti "destination unreachable". Router rumahmu juga menjalankan NAT. Router menulis ulang alamat sumber privatmu (`192.168.x.x`) menjadi satu alamat publik miliknya.
 
-Protokol umum dan transport-nya:
-
-| Protokol             | Transport | Alasan                                           |
-| -------------------- | --------- | ------------------------------------------------ |
-| HTTP/1.1, HTTP/2     | TCP       | Halaman dan respons API harus lengkap.           |
-| HTTP/3               | QUIC di atas UDP | Menghindari head-of-line blocking TCP di jaringan seluler yang sering hilang paket, reconnect 0-RTT. |
-| SSH, PostgreSQL, MySQL, Redis | TCP | Perintah harus sampai sekali dan berurutan. |
-| DNS                  | UDP, TCP untuk jawaban besar dan zone transfer | Satu pertanyaan kecil, satu jawaban kecil. |
-| WebRTC, VoIP         | UDP       | Frame yang telat 300 ms lebih buruk daripada frame yang hilang. |
-| WireGuard            | UDP       | Membawa TCP di dalamnya. TCP di atas TCP mengirim ulang dua kali dan macet. |
-
-Kesalahan yang sering terjadi adalah membangun game real-time atau siaran video di atas TCP. Saat satu paket hilang, semua paket yang lebih baru menunggu di belakangnya. Dengan UDP kamu bisa melewati yang hilang dan memakai data terbaru.
-
-## Praktik langsung di Linux
-
-Lab ini membuat dua network namespace yang disambung kabel virtual, jadi kamu bisa merusak jaringan tanpa menyentuh jaringan aslimu. Langkah 1 sampai 4 butuh root. Langkah 5 tidak.
-
-### 1. Siapkan dua namespace
+Di Linux, kernel yang mengerjakan layer 3. Kernel memegang tabel routing, memutuskan apakah sebuah paket untuk mesin ini atau perlu diteruskan, dan menjalankan hook netfilter tempat aturan nftables diterapkan.
 
 ```bash
-sudo ip netns add client
-sudo ip netns add server
-sudo ip link add veth-c type veth peer name veth-s     # kabel virtual dengan dua ujung
-sudo ip link set veth-c netns client                    # colok satu ujung ke "client"
-sudo ip link set veth-s netns server                    # dan ujung lain ke "server"
-sudo ip -n client addr add 10.0.0.1/24 dev veth-c
-sudo ip -n server addr add 10.0.0.2/24 dev veth-s
-sudo ip -n client link set veth-c up
-sudo ip -n server link set veth-s up
-sudo ip -n server link set lo up
-
-cl() { sudo ip netns exec client "$@"; }   # jalankan perintah di dalam "client"
-sv() { sudo ip netns exec server "$@"; }   # jalankan perintah di dalam "server"
-
-cl ping -c 2 10.0.0.2
+ip -br addr                             # alamat IP di tiap interface
+ip route                                # tabel routing
+ip route get 1.1.1.1                    # rute, interface, dan IP sumber yang akan dipakai kernel
+ping -c 3 192.168.1.1                   # ICMP echo: apakah layer 3 sampai ke host itu?
+tracepath -n 1.1.1.1                    # setiap router di jalur, plus path MTU
+mtr -n 1.1.1.1                          # traceroute langsung dengan kehilangan paket per hop
+sysctl net.ipv4.ip_forward              # 1 = mesin ini meneruskan paket untuk mesin lain
+sudo nft list ruleset                   # aturan firewall di hook layer 3
 ```
 
-Kedua fungsi ini jalan di bash dan zsh. Tiap namespace punya interface, rute, socket, firewall, dan sysctl TCP sendiri.
+```
+$ ip route get 1.1.1.1
+1.1.1.1 via 192.168.1.1 dev enp4s0 src 192.168.1.6 uid 1000
 
-### 2. Lihat handshake
+$ tracepath -n 1.1.1.1
+ 1?: [LOCALHOST]                      pmtu 1500
+ 1:  192.168.1.1                                           0.655ms
+ 2:  10.89.192.1                                           6.320ms
+ 3:  no reply
+ 4:  162.158.43.14                                         3.588ms
+```
+
+Kamu berurusan dengan layer 3 kalau:
+
+- Muncul `Network is unreachable`. Kernel tidak punya rute untuk alamat itu. Cek apakah `ip route` punya baris `default via`.
+- Muncul `No route to host`. Rutenya ada, tetapi host tidak menjawab ARP, atau router atau firewall mengirim balik ICMP "unreachable".
+- LAN jalan tetapi internet tidak. Default gateway salah atau mati.
+- Mesin Linux yang seharusnya meneruskan paket (server VPN, host Docker, router) tidak melakukannya. `ip_forward` bernilai 0, atau chain `forward` di firewall membuang lalu lintasnya.
+- `ping` berhasil tetapi layanannya tidak. Layer 3 baik-baik saja. Naik ke layer 4.
+
+### Layer 4: Transport
+
+Layer 4 memindahkan data antarprogram. IP mengantar paket ke mesin yang benar. Nomor port mengantarnya ke program yang benar di mesin itu. Satu koneksi dikenali dari empat nilai: IP sumber, port sumber, IP tujuan, dan port tujuan.
+
+Ada dua protokol utama.
+
+TCP memberi aliran byte yang andal dan berurutan. TCP membuka koneksi dengan three-way handshake, memberi nomor setiap byte, menunggu acknowledgment, mengirim ulang yang hilang, dan melambat saat jaringan atau penerima penuh.
+
+```
+ klien                                  server (listen di port 443)
+   │ ── SYN ─────────────────────────────► │
+   │ ◄──────────────────────────── SYN+ACK │
+   │ ── ACK ─────────────────────────────► │   koneksi terbuka, data bisa mengalir
+```
+
+UDP mengirim datagram yang berdiri sendiri. Tidak ada handshake, tidak ada urutan, dan tidak ada pengiriman ulang. Header-nya 8 byte. Datagram yang hilang ya hilang, kecuali programnya mengirim ulang.
+
+| Pakai TCP kalau                                 | Pakai UDP kalau                                  |
+| ----------------------------------------------- | ------------------------------------------------ |
+| Setiap byte penting: halaman web, file, API, SSH | Data telat tidak berguna: panggilan suara dan video, game |
+| Urutan penting: query database                  | Pesan kecil dan berdiri sendiri: DNS, NTP, DHCP  |
+| Kamu ingin kernel yang mengurus pengiriman ulang | Kamu mengurus keandalan sendiri, seperti QUIC   |
+
+HTTP/3 berjalan di atas QUIC, yang berjalan di atas UDP. QUIC mengerjakan tugas layer 4 di dalam browser, jadi satu paket hilang hanya menahan satu stream, bukan seluruh koneksi.
+
+Di Linux, kernel yang menjalankan TCP dan UDP. Programmu hanya melihat socket, yang berupa file descriptor.
 
 ```bash
-mkdir -p /tmp/tcplab && head -c 20M /dev/urandom > /tmp/tcplab/blob
-sv python3 -m http.server 8080 --bind 10.0.0.2 --directory /tmp/tcplab   # terminal 1
-sv tcpdump -ni veth-s tcp port 8080                                     # terminal 2
-cl curl -s -o /dev/null http://10.0.0.2:8080/                           # terminal 3
+ss -tulpn                               # port TCP dan UDP yang listen beserta prosesnya
+ss -tan state established               # koneksi TCP yang terbuka
+ss -ti                                  # detail per koneksi: rtt, congestion window, retransmisi
+nc -zv example.com 443                  # bisakah koneksi TCP ke port ini dibuka?
+sudo tcpdump -ni any 'tcp[tcpflags] & tcp-syn != 0'   # hanya percobaan koneksi
+nstat -az | grep -i retrans             # counter retransmisi kernel
 ```
 
-Tiga baris pertama output `tcpdump` adalah handshake (dipotong):
-
 ```
-10.0.0.1.41822 > 10.0.0.2.8080: Flags [S],  seq 3542141823, win 64240, options [mss 1460,sackOK,TS ...,nop,wscale 7], length 0
-10.0.0.2.8080 > 10.0.0.1.41822: Flags [S.], seq 1803340530, ack 3542141824, win 65160, options [mss 1460,sackOK,TS ...,nop,wscale 7], length 0
-10.0.0.1.41822 > 10.0.0.2.8080: Flags [.],  ack 1, win 502, length 0
+$ ss -tlnp
+State  Recv-Q Send-Q   Local Address:Port  Peer Address:Port
+LISTEN 0      4096     127.0.0.53%lo:53         0.0.0.0:*
+LISTEN 0      4096           0.0.0.0:4000       0.0.0.0:*
 ```
 
-| Flag `tcpdump` | Flag TCP         |
-| -------------- | ---------------- |
-| `[S]`          | SYN              |
-| `[S.]`         | SYN+ACK (`.` artinya ACK) |
-| `[.]`          | ACK saja         |
-| `[P.]`         | PSH+ACK, membawa data |
-| `[F.]`         | FIN+ACK          |
-| `[R]` / `[R.]` | RST              |
+`127.0.0.53:53` adalah systemd-resolved, cache DNS lokal. Ia hanya listen di loopback, jadi mesin lain tidak bisa menjangkaunya. `0.0.0.0:4000` menerima koneksi di semua interface.
 
-Setelah handshake, `tcpdump` menampilkan sequence number relatif terhadap ISN (`ack 1`) supaya mudah dibaca. Tambahkan `-S` untuk nilai absolutnya. `win 502` terlihat kecil, tetapi dengan `wscale 7` artinya 502 × 128 = 64256 byte.
+Kamu berurusan dengan layer 4 kalau:
 
-### 3. Ditolak, dibuang, dan di-reject
+- Muncul `Connection refused`. Host-nya menyala, tetapi tidak ada yang listen di port itu dan kernel menjawab RST. Cek `ss -tlnp`.
+- Koneksi menggantung lalu timeout. Ada yang membuang paket, biasanya firewall. Penolakan gagal dalam milidetik, timeout butuh detik atau menit.
+- Layanan jalan dari server itu sendiri tetapi tidak dari luar. Ia listen di `127.0.0.1`, bukan `0.0.0.0`.
+- Muncul `Address already in use`. Proses lain memegang port itu.
+- Jumlah `CLOSE-WAIT` di `ss -tan` terus naik. Programmu tidak memanggil `close()` pada socket yang sudah ditutup lawan.
+
+### Layer 5: Session
+
+Layer 5 membuka, menjaga, melanjutkan, dan menutup percakapan antara dua program. TCP/IP tidak punya lapisan sesi tersendiri. Program dan library mengerjakannya sendiri, jadi lapisan ini paling sulit ditunjuk.
+
+Contoh nyatanya:
+
+- TLS session resumption. Klien yang tersambung ulang bisa memakai kunci dari sesi sebelumnya dan melewati sebagian besar handshake.
+- HTTP/2 dan HTTP/3 menjalankan banyak stream request di dalam satu koneksi.
+- HTTP keep-alive dan connection pool memakai satu koneksi TCP untuk banyak request.
+- SSH multiplexing (`ControlMaster`) menjalankan banyak perintah `ssh` dan `scp` lewat satu sesi SSH yang terbuka.
+- Framework RPC, proxy SOCKS, dan berbagi file SMB menyimpan sesi masing-masing.
+
+Cookie login juga disebut "session", tetapi itu milik aplikasi di layer 7.
+
+Di Linux, layer 5 berjalan di user space, di dalam programmu atau library-nya.
 
 ```bash
-cl nc -zv 10.0.0.2 9999
-# nc: connect to 10.0.0.2 port 9999 (tcp) failed: Connection refused     ← langsung, kernel mengirim RST
+openssl s_client -connect example.com:443 -tls1_2 -reconnect </dev/null 2>/dev/null | grep -E '^(New|Reused)'
+# New, TLSv1.2, Cipher is ECDHE-ECDSA-CHACHA20-POLY1305       ← koneksi pertama: handshake penuh
+# Reused, TLSv1.2, Cipher is ECDHE-ECDSA-CHACHA20-POLY1305    ← sambungan ulang melanjutkan sesi
 
-sv nft add table inet lab
-sv nft add chain inet lab input '{ type filter hook input priority 0; policy accept; }'
-sv nft add rule inet lab input tcp dport 9999 drop
-sv nft add rule inet lab input tcp dport 9998 reject with tcp reset
+curl -sv -o /dev/null -o /dev/null https://example.com/ https://example.com/ 2>&1 | grep -i 're-using'
+# * Re-using existing connection with host example.com        ← request kedua, tanpa handshake baru
 
-cl nc -zv -w 10 10.0.0.2 9999
-# menggantung, lalu: nc: connect to 10.0.0.2 port 9999 (tcp) timed out    ← firewall membuang SYN
-
-cl nc -zv 10.0.0.2 9998
-# Connection refused                                                       ← firewall memalsukan RST
+ssh -O check prod                       # apakah ada sesi SSH bersama yang terbuka?
 ```
 
-Jalankan `sv tcpdump -ni veth-s -ttt tcp port 9999` saat tes dibuang. `-ttt` mencetak selang waktu antarpaket, dan percobaan ulang SYN datang dengan jarak yang makin panjang: 1, 2, 4, lalu 8 detik. Tanpa `-w`, kernel berhenti setelah `tcp_syn_retries` (6) kali coba, sekitar 127 detik totalnya.
+Kamu berurusan dengan layer 5 kalau:
 
-### 4. Tambahkan delay dan kehilangan paket
+- Setiap request membayar handshake TCP dan TLS baru karena klien tidak memakai ulang koneksi.
+- Load balancer mengirim tiap request dari satu sesi ke backend yang berbeda. Ini butuh "sticky session" atau penyimpanan sesi bersama.
+- Koneksi berumur panjang (WebSocket, pool database) mati setelah idle timeout di proxy atau NAT.
+
+### Layer 6: Presentation
+
+Layer 6 memastikan kedua sisi membaca byte dengan cara yang sama. Lapisan ini mencakup encoding (UTF-8), serialisasi (JSON, Protocol Buffers), kompresi (gzip, Brotli), dan enkripsi (TLS).
+
+Di Linux, layer 6 juga berjalan di user space, di library seperti OpenSSL, zlib, dan parser JSON di dalam programmu. Pengecualiannya kTLS, di mana kernel mengenkripsi record TLS setelah program menyelesaikan handshake.
 
 ```bash
-sv tc qdisc add dev veth-s root netem delay 50ms loss 2%   # kabel lambat dan bocor dari sisi server
-cl ping -c 3 10.0.0.2                                      # RTT sekarang sekitar 50 ms
-cl curl -o /dev/null http://10.0.0.2:8080/blob             # catat kecepatannya
-
-sv ss -ti 'sport = :8080'                                  # jalankan selama download
-sv nstat -az TcpRetransSegs                                # total segmen yang dikirim ulang
+openssl s_client -connect example.com:443 -servername example.com -brief </dev/null
+printf 'é' | od -An -tx1                 # c3 a9: huruf é sebagai byte UTF-8
+printf '\xc3\xa9' | iconv -f latin1 -t utf-8   # Ã©: byte yang sama dibaca sebagai Latin-1
+file data.bin                            # tebak format file dari byte-nya
+curl -s --compressed -o /dev/null -w '%{size_download}\n' https://example.com
 ```
 
-`ss -ti` mencetak baris seperti ini untuk tiap koneksi (dipotong, angkamu akan berbeda):
-
 ```
-cubic wscale:7,7 rto:256 rtt:51.2/1.4 mss:1448 cwnd:14 ssthresh:12 ... retrans:0/37 ...
+$ openssl s_client -connect example.com:443 -servername example.com -brief </dev/null
+CONNECTION ESTABLISHED
+Protocol version: TLSv1.3
+Ciphersuite: TLS_AES_256_GCM_SHA384
+Peer certificate: CN = example.com
+Verification: OK
 ```
 
-| Field          | Arti                                                     |
-| -------------- | -------------------------------------------------------- |
-| `cubic`        | Algoritma congestion control socket ini.                 |
-| `rtt:51.2/1.4` | Rata-rata round-trip time dan variasinya, dalam ms.      |
-| `rto:256`      | Retransmission timeout saat ini, dalam ms.               |
-| `cwnd:14`      | Congestion window, dalam segmen.                         |
-| `ssthresh:12`  | Batas akhir slow start setelah kehilangan paket terakhir. |
-| `retrans:0/37` | Segmen yang sedang dikirim ulang / total.                |
+Kamu berurusan dengan layer 6 kalau:
 
-Sekarang bandingkan:
+- Teks tampil sebagai `Ã©`, bukan `é`. Satu sisi menulis UTF-8 dan sisi lain membacanya sebagai Latin-1.
+- TLS gagal dengan `certificate has expired` atau nama host tidak cocok.
+- OpenSSL menampilkan `wrong version number`. Klien bicara TLS ke port yang bicara HTTP biasa.
+- API membalas `415 Unsupported Media Type`. Kamu mengirim form data padahal API-nya menunggu JSON.
+
+### Layer 7: Application
+
+Layer 7 adalah protokol yang dipakai programmu: HTTP, DNS, SSH, SMTP, IMAP, MQTT, protokol wire PostgreSQL. Alamat di sini berupa hostname, URL, path, dan alamat email.
+
+Di Linux, layer 7 adalah program dan daemon biasa: nginx, sshd, postfix, dan systemd-resolved untuk DNS.
 
 ```bash
-sv tc qdisc change dev veth-s root netem delay 50ms loss 0%    # tanpa kehilangan: jauh lebih cepat
-sv tc qdisc change dev veth-s root netem delay 50ms loss 5%    # lebih banyak hilang: jauh lebih lambat
-
-sudo modprobe tcp_bbr
-sv sysctl -w net.ipv4.tcp_congestion_control=bbr               # hanya untuk namespace server
-cl curl -o /dev/null http://10.0.0.2:8080/blob                 # biasanya jauh lebih cepat dari cubic di loss 5%
+curl -v https://example.com             # DNS, koneksi TCP, TLS, lalu request dan respons HTTP
+dig example.com                         # pertanyaan dan jawaban DNS
+resolvectl status                       # server DNS yang dipakai systemd-resolved
+ssh -v user@host                        # negosiasi SSH langkah demi langkah
+journalctl -u nginx -n 50               # log layanan layer 7
 ```
 
-CUBIC menganggap setiap paket hilang sebagai antrean penuh dan memotong window-nya. Dengan kehilangan acak tanpa kemacetan sungguhan, pemotongan itu salah. BBR tidak menganggap paket hilang sebagai kemacetan, jadi kehilangan acak jauh lebih sedikit memperlambatnya.
+`curl -v` melewati beberapa lapisan dalam satu perintah:
 
-### 5. Penuhi accept queue (tanpa root)
+```
+* Host example.com:443 was resolved.                       ← L7: DNS menjawab
+* Connected to example.com (172.66.147.243) port 443       ← L3 dan L4: rute ditemukan, handshake TCP selesai
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384    ← L5 dan L6: sesi TLS dan enkripsi
+* ALPN: server accepted h2                                 ← kedua sisi sepakat memakai HTTP/2
+> GET / HTTP/2                                             ← L7: request
+< HTTP/2 200                                               ← L7: respons
+```
+
+Kamu berurusan dengan layer 7 kalau:
+
+- `Could not resolve host`. DNS gagal. Cek `resolvectl status` dan `dig`.
+- HTTP membalas 4xx atau 5xx. `502 Bad Gateway` berarti proxy sudah sampai ke layer 4 backend-nya tetapi tidak mendapat balasan HTTP yang valid.
+- Situs yang salah yang menjawab. Header `Host` atau nama SNI di TLS tidak cocok dengan konfigurasi server.
+
+## Perangkat dan lapisan tempatnya bekerja
+
+| Lapisan | Perangkat dan software                                               | Padanan di Linux                      |
+| ------- | -------------------------------------------------------------------- | ------------------------------------- |
+| 1       | kabel, hub, repeater, media converter                                | tidak ada                             |
+| 2       | switch, access point, bridge                                         | `ip link add br0 type bridge`         |
+| 3       | router, switch layer 3                                               | `sysctl net.ipv4.ip_forward=1`        |
+| 3, 4    | firewall stateful, security group cloud, NAT                         | nftables                              |
+| 4       | load balancer L4 (AWS NLB, IPVS)                                     | `ipvsadm`, HAProxy `mode tcp`         |
+| 7       | reverse proxy, load balancer L7 (AWS ALB), WAF, API gateway          | nginx, HAProxy `mode http`, Envoy     |
+
+Satu mesin Linux bisa mengerjakan semuanya sekaligus. Host Docker biasa adalah switch (bridge), router (`ip_forward`), firewall dan NAT (nftables), dan sering juga reverse proxy (nginx).
+
+### Load balancing L4 atau L7
+
+Ini salah satu keputusan nyata yang paling sering memakai nomor OSI.
+
+| Load balancer L4                                     | Load balancer L7                                      |
+| ---------------------------------------------------- | ----------------------------------------------------- |
+| Hanya melihat alamat IP dan port                     | Membaca request HTTP lengkap                          |
+| Bisa untuk protokol TCP atau UDP apa pun: database, MQTT, server game | Untuk HTTP, gRPC, WebSocket          |
+| Meneruskan TLS apa adanya, backend yang memegang sertifikat | Mengakhiri TLS, load balancer yang memegang sertifikat |
+| Tidak bisa merutekan berdasarkan URL, header, atau cookie | Merutekan berdasarkan host, path, header, atau cookie |
+| CPU per koneksi sangat kecil                         | CPU lebih besar, tetapi bisa retry, cache, kompresi, dan menambah header |
+
+Pilih L4 untuk lalu lintas non-HTTP, atau kalau backend harus melihat koneksi TLS aslinya. Pilih L7 kalau kamu butuh routing berdasarkan path (`/api` ke satu layanan, `/` ke layanan lain), satu sertifikat untuk banyak backend, atau retry dan log di level HTTP.
+
+## Troubleshooting dari bawah ke atas
+
+Saat sesuatu tidak tersambung, cek lapisannya berurutan dari 1 sampai 7. Berhenti di lapisan pertama yang gagal. Masalah di lapisan bawah merusak semua yang ada di atasnya.
 
 ```bash
-python3 -c 'import socket, time
-s = socket.socket(); s.bind(("127.0.0.1", 7000)); s.listen(2); time.sleep(60)' &   # listen, tapi tidak pernah accept
-
-for i in 1 2 3 4 5 6; do nc 127.0.0.1 7000 </dev/null & done
-
-ss -ltn 'sport = :7000'
-ss -tan 'dport = :7000'
-nstat -az TcpExtListenOverflows
+ip -br link                                        # L1: apakah interface UP dengan LOWER_UP?
+ip neigh show 192.168.1.1                          # L2: apakah gateway menjawab ARP (REACHABLE)?
+ip route get 1.1.1.1 && ping -c 2 1.1.1.1          # L3: ada rute, dan paketnya kembali?
+nc -zv example.com 443                             # L4: bisakah koneksi TCP dibuka?
+openssl s_client -connect example.com:443 -brief </dev/null   # L5, L6: apakah TLS jalan?
+curl -v https://example.com                        # L7: apakah aplikasinya menjawab?
 ```
 
-Output di Linux 6.8:
+`curl -v` saja sering sudah menunjukkan lapisan mana yang berhenti, karena ia mencetak tiap tahap sebelum gagal.
 
-```
-State  Recv-Q Send-Q Local Address:Port Peer Address:Port
-LISTEN 3      2          127.0.0.1:7000      0.0.0.0:*
+Pesan error yang umum dan lapisannya:
 
-State    Recv-Q Send-Q Local Address:Port  Peer Address:Port
-ESTAB    0      0          127.0.0.1:60736    127.0.0.1:7000
-ESTAB    0      0          127.0.0.1:60746    127.0.0.1:7000
-ESTAB    0      0          127.0.0.1:60758    127.0.0.1:7000
-SYN-SENT 0      1          127.0.0.1:60770    127.0.0.1:7000
-SYN-SENT 0      1          127.0.0.1:60784    127.0.0.1:7000
-SYN-SENT 0      1          127.0.0.1:60792    127.0.0.1:7000
-```
+| Pesan                                     | Lapisan | Arti                                               |
+| ----------------------------------------- | ------- | -------------------------------------------------- |
+| `NO-CARRIER` di `ip link`                 | 1       | Tidak ada link fisik.                              |
+| `FAILED` di `ip neigh`                    | 2       | Host tidak menjawab ARP.                           |
+| `Network is unreachable`                  | 3       | Tidak ada rute untuk alamat itu.                   |
+| `No route to host`                        | 3       | Host tidak menjawab ARP, atau firewall menolak dengan ICMP. |
+| `Connection timed out`                    | 3 atau 4 | Paket dibuang di suatu tempat di jalur.           |
+| `Connection refused`                      | 4       | Tidak ada yang listen di port itu.                 |
+| `wrong version number`                    | 6       | Klien TLS bicara ke port non-TLS.                  |
+| `certificate has expired`                 | 6       | Masalah sertifikat.                                |
+| `Could not resolve host`                  | 7       | Pencarian DNS gagal.                               |
+| `502 Bad Gateway`                         | 7       | Proxy tidak mendapat jawaban valid dari backend-nya. |
 
-Di socket `LISTEN`, `Recv-Q` adalah jumlah koneksi yang menunggu di accept queue dan `Send-Q` adalah backlog-nya. Linux mengizinkan backlog + 1 entri, jadi tiga klien sudah `ESTAB` padahal programnya tidak pernah memanggil `accept()`. Tiga sisanya tertahan di `SYN-SENT` karena kernel membuang SYN mereka, dan `ListenOverflows` terus naik.
+## Melihat layer 2 sampai 4 dalam satu tangkapan
 
-Untuk melihat `CLOSE-WAIT`, sambungkan ke server yang menutup duluan dan jangan pernah menutup sisimu:
+`tcpdump -e` juga mencetak header Ethernet, jadi satu baris menunjukkan tiga lapisan sekaligus:
 
 ```bash
-python3 -m http.server 8765 --bind 127.0.0.1 &
-python3 -c 'import socket, time
-s = socket.create_connection(("127.0.0.1", 8765))
-s.send(b"GET / HTTP/1.0\r\n\r\n"); time.sleep(30)' &
-ss -tan '( sport = :8765 or dport = :8765 )'
-# CLOSE-WAIT 4460 0   127.0.0.1:53154  127.0.0.1:8765    ← sisi kita: lawan sudah tutup, kita belum
-# FIN-WAIT-2 0    0   127.0.0.1:8765   127.0.0.1:53154   ← sisi server: menunggu FIN dari kita
+sudo tcpdump -eni enp4s0 -c 3 'tcp port 443'      # terminal 1
+curl -s -o /dev/null https://example.com          # terminal 2
 ```
 
-### Bersih-bersih
-
-```bash
-sudo ip netns del client
-sudo ip netns del server        # sekaligus menghapus pasangan veth, aturan tc, dan tabel nft
-kill %1 %2 2>/dev/null; pkill -f 'nc 127.0.0.1 7000'
+```
+00:2b:67:61:2c:81 > d8:9a:0d:80:8f:f9, ethertype IPv4 (0x0800), length 74: 192.168.1.6.51234 > 172.66.147.243.443: Flags [S], seq 3542141823, win 64240, length 0
+└───────── L2: alamat MAC ──────────┘  └───── L2: tipe ──────┘             └───────── L3: IP, L4: port ─────────┘  └ L4: flag ┘
 ```
 
-## Troubleshooting berdasarkan gejala
-
-| Gejala                                      | Yang terlihat                             | Penyebab dan solusi                             |
-| ------------------------------------------- | ----------------------------------------- | ----------------------------------------------- |
-| "Connection refused" seketika               | `RST` di `tcpdump`                        | Tidak ada yang listen di port itu, atau hanya listen di `127.0.0.1`. Cek `ss -ltn`. |
-| Connect menggantung, lalu timeout           | Klien di `SYN-SENT`, SYN berulang         | Ada yang membuang paket: firewall, security group, rute salah, host mati. Jalankan `tcpdump` di kedua ujung. |
-| Jumlah `CLOSE-WAIT` terus naik              | `ss -tan state close-wait`                | Programmu tidak pernah memanggil `close()`. Tutup socket di `finally` atau `defer`. |
-| Ribuan `TIME-WAIT`                          | `ss -tan state time-wait \| wc -l`        | Normal untuk sisi yang menutup duluan. Hanya masalah kalau port ephemeral habis. Pakai ulang koneksi (keep-alive, pool). |
-| Klien timeout saat beban tinggi             | `Recv-Q` di `LISTEN` sama dengan `Send-Q`, `ListenOverflows` naik | Program terlalu lambat memanggil accept. Tambah worker, naikkan backlog `listen()` dan `net.core.somaxconn`. |
-| Request-response kecil lambat sekitar 40 ms | Jeda di antara segmen kecil               | Algoritma Nagle ditambah delayed ACK. Set `TCP_NODELAY` di socket. |
-| Koneksi idle mati setelah beberapa menit    | `RST` atau sunyi setelah idle             | NAT atau load balancer melupakan koneksinya. Aktifkan keepalive dengan waktu idle lebih pendek, atau kirim ping di level aplikasi. |
-| Throughput rendah di link jarak jauh        | `cwnd` atau `rwnd` kecil di `ss -ti`      | Window lebih kecil dari bandwidth × RTT. Cek `wscale`, naikkan maksimum `tcp_rmem`/`tcp_wmem`, coba BBR. |
-
-Baris terakhir disebut **bandwidth-delay product**. Untuk mengisi 1 Gbit/s dengan RTT 100 ms, harus ada 12,5 MB data di jalan. Dengan buffer penerimaan maksimum bawaan 6 MB, satu koneksi mentok di sekitar 500 Mbit/s secepat apa pun link-nya.
-
-## Contekan sysctl
-
-Nilai bawaan dari Ubuntu 24.04 dengan kernel 6.8. Baca dengan `sysctl <nama>`, ubah dengan `sysctl -w <nama>=<nilai>`, buat permanen di `/etc/sysctl.d/*.conf`.
-
-| Setting                          | Bawaan             | Mengatur                                        |
-| -------------------------------- | ------------------ | ----------------------------------------------- |
-| `net.ipv4.tcp_congestion_control` | `cubic`           | Algoritma congestion control.                   |
-| `net.ipv4.tcp_syn_retries`       | `6`                | Percobaan ulang SYN sebelum `connect()` gagal (sekitar 127 dtk). |
-| `net.ipv4.tcp_synack_retries`    | `5`                | Percobaan ulang SYN+ACK di sisi server.         |
-| `net.ipv4.tcp_retries2`          | `15`               | Percobaan ulang data sebelum koneksi yang sudah terbuka diputus (sekitar 15 menit). |
-| `net.core.somaxconn`             | `4096`             | Batas maksimum accept queue untuk `listen()` mana pun. |
-| `net.ipv4.tcp_max_syn_backlog`   | `1024`             | Batas maksimum SYN queue.                       |
-| `net.ipv4.tcp_syncookies`        | `1`                | SYN cookies saat SYN queue meluap.              |
-| `net.ipv4.tcp_rmem`              | `4096 131072 6291456` | Buffer terima min, default, max (byte).      |
-| `net.ipv4.tcp_wmem`              | `4096 16384 4194304`  | Buffer kirim min, default, max (byte).       |
-| `net.ipv4.ip_local_port_range`   | `32768 60999`      | Port ephemeral untuk koneksi keluar.            |
-| `net.ipv4.tcp_tw_reuse`          | `2`                | Pakai ulang port `TIME-WAIT` untuk koneksi keluar baru. 2 = hanya loopback. |
-| `net.ipv4.tcp_fin_timeout`       | `60`               | Lama socket yatim bertahan di `FIN-WAIT-2`. **Tidak** mengubah `TIME-WAIT`. |
-| `net.ipv4.tcp_keepalive_time`    | `7200`             | Detik idle sebelum probe keepalive pertama.     |
-| `net.ipv4.tcp_keepalive_intvl`   | `75`               | Detik antarprobe.                                |
-| `net.ipv4.tcp_keepalive_probes`  | `9`                | Jumlah probe gagal sebelum koneksi diputus.     |
-
-Jangan menyalin daftar tuning dari blog. Sebagian besar nilai bawaan sudah tepat untuk sebagian besar mesin. Ubah satu nilai saat hasil pengukuran seperti `nstat`, `ss -ti`, atau counter di `/proc/net/netstat` menunjuk ke sana.
+Baris ini dipersingkat, dan port serta angkamu akan berbeda. MAC tujuannya milik router (`d8:9a:0d:80:8f:f9` dari `ip neigh`), sedangkan IP tujuannya milik web server. Mesinmu mengirim frame ke router di layer 2 dan mengalamatkan paket ke server di layer 3. Layer 7 terenkripsi, jadi `tcpdump` tidak bisa menampilkan request HTTP-nya.
 
 ## Ringkasan
 
-1. TCP ada di layer 4. IP menemukan mesinnya, port menemukan programnya, dan TCP membuat aliran byte-nya andal.
-2. Handshake memakan satu round trip. Pakai ulang koneksi.
-3. ACK bersifat kumulatif. Segmen yang hilang dikirim ulang setelah duplicate ACK atau timeout, dan data di belakangnya menunggu.
-4. Kecepatan kirim adalah `min(rwnd, cwnd)`. Penerima membatasi `rwnd`, jaringan membatasi `cwnd`.
-5. TCP berjalan di kernel. Programmu hanya menyalin byte masuk dan keluar dari buffer socket.
-6. Ditolak itu cepat dan berarti tidak ada yang listen. Timeout itu lambat dan berarti ada yang membuang paket.
-7. Jumlah `CLOSE-WAIT` yang terus naik berarti programmu tidak memanggil `close()`. `TIME-WAIT` normal, kecuali port ephemeral habis.
+1. OSI punya tujuh lapisan. TCP/IP, yang dijalankan internet, punya empat. Orang tetap memakai nomor OSI.
+2. Tiap lapisan menambahkan header saat turun dan melepasnya saat naik. Tiap perangkat hanya membaca lapisan yang ia butuhkan.
+3. Di Linux, kartu jaringan mengerjakan layer 1. Kernel mengerjakan layer 2 sampai 4. Programmu mengerjakan layer 5 sampai 7. Socket API adalah garis antara kernel dan programmu.
+4. Alamat MAC berganti di setiap hop. Alamat IP tetap sama dari ujung ke ujung, kecuali di tempat NAT menulis ulang.
+5. Troubleshoot dari layer 1 ke atas. `ping` hanya membuktikan layer 3, `nc -z` membuktikan layer 4, dan `curl -v` menunjukkan semuanya.
 
 </div>
 
 <style>
-.tcp-sim{border:1px solid #d0d7de;border-radius:.75rem;padding:1rem;margin:1.5em 0;background:#fff;font-size:.9rem}
-.tcp-sim__bar{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:1rem}
-.tcp-sim__bar select,.tcp-sim__bar button{border:1px solid #d0d7de;border-radius:.5rem;padding:.3rem .75rem;background:#f6f8fa;font-size:.85rem;line-height:1.25rem;cursor:pointer;color:#1f2328}
-.tcp-sim__bar button:hover:not(:disabled){background:#e9ecef;border-color:#afb8c1}
-.tcp-sim__bar button:disabled{opacity:.45;cursor:not-allowed}
-.tcp-sim__bar .tcp-sim__count{margin-left:auto;color:#636c76;font-size:.8rem}
-.tcp-sim__hosts{display:flex;justify-content:space-between}
-.tcp-sim__host{width:8.5rem;text-align:center;border:1px solid #d0d7de;border-radius:.5rem;padding:.35rem .25rem;background:#f6f8fa}
-.tcp-sim__host b{display:block;font-size:.7rem;color:#636c76;text-transform:uppercase;letter-spacing:.05em}
-.tcp-sim__state{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;font-size:.8rem;color:#0969da}
-.tcp-sim__state.is-changed{animation:tcp-sim-flash 1s ease-out}
-@keyframes tcp-sim-flash{from{background:#fff8c5}to{background:transparent}}
-.tcp-sim__ladder{margin:0 4.25rem;padding:.25rem 0 .5rem;min-height:2.5rem;border-left:2px solid #afb8c1;border-right:2px solid #afb8c1}
-.tcp-sim__row{position:relative;height:2.5rem;border-radius:.25rem}
-.tcp-sim__row.is-current{background:#ddf4ff}
-.tcp-sim__line{position:absolute;top:1.65rem;left:0;right:0;height:2px;background:#1f2328}
-.tcp-sim__line::after{content:"";position:absolute;top:-5px;border-top:6px solid transparent;border-bottom:6px solid transparent}
-.tcp-sim__row--right .tcp-sim__line::after{right:-1px;border-left:9px solid #1f2328}
-.tcp-sim__row--left .tcp-sim__line::after{left:-1px;border-right:9px solid #1f2328}
-.tcp-sim__row.is-lost .tcp-sim__line{background:repeating-linear-gradient(90deg,#cf222e 0 6px,transparent 6px 10px)}
-.tcp-sim__row--right.is-lost .tcp-sim__line{right:45%}
-.tcp-sim__row--left.is-lost .tcp-sim__line{left:45%}
-.tcp-sim__row.is-lost .tcp-sim__line::after{content:"\2715";border:0;color:#cf222e;font-weight:700;font-size:.9rem;top:-.7rem}
-.tcp-sim__row--right.is-lost .tcp-sim__line::after{right:-.6rem}
-.tcp-sim__row--left.is-lost .tcp-sim__line::after{left:-.6rem}
-.tcp-sim__label{position:absolute;top:.3rem;left:.5rem;right:.5rem;text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tcp-sim__row.is-lost .tcp-sim__label{color:#cf222e}
-.tcp-sim__row--event .tcp-sim__label{top:.75rem;color:#636c76;font-style:italic}
-.tcp-sim__note{margin-top:.75rem;padding:.6rem .8rem;background:#f6f8fa;border-left:3px solid #0969da;border-radius:.25rem;min-height:3.5rem}
-.markdown-body .tcp-sim__dump{margin:.75rem 0 0;font-size:.75rem;line-height:1.5;max-height:12rem;overflow:auto;white-space:pre}
-@media (max-width:40rem){.tcp-sim__host{width:6.5rem}.tcp-sim__ladder{margin:0 3.25rem}.tcp-sim__label{font-size:.65rem}}
+.osi-sim{border:1px solid #d0d7de;border-radius:.75rem;padding:1rem;margin:1.5em 0;background:#fff;font-size:.9rem}
+.osi-sim__bar{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:1rem}
+.osi-sim__bar select,.osi-sim__bar button{border:1px solid #d0d7de;border-radius:.5rem;padding:.3rem .75rem;background:#f6f8fa;font-size:.85rem;line-height:1.25rem;cursor:pointer;color:#1f2328}
+.osi-sim__bar button:hover:not(:disabled){background:#e9ecef;border-color:#afb8c1}
+.osi-sim__bar button:disabled{opacity:.45;cursor:not-allowed}
+.osi-sim__count{margin-left:auto;color:#636c76;font-size:.8rem}
+.osi-sim__stage{display:grid;grid-template-columns:1fr minmax(6rem,.8fr) 1fr;gap:.75rem;align-items:start}
+.osi-sim__title{font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:#636c76;text-align:center;margin-bottom:.35rem;min-height:2.2em}
+.osi-sim__stack{display:flex;flex-direction:column;gap:3px}
+.osi-sim__layer{display:flex;gap:.4rem;align-items:center;border:1px solid #d0d7de;border-radius:.35rem;padding:.2rem .45rem;font-size:.78rem;color:#636c76;background:#fff;transition:background .25s,color .25s,border-color .25s}
+.osi-sim__layer b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.72rem;min-width:1.5rem}
+.osi-sim__layer.is-active{color:#1f2328;font-weight:600;box-shadow:0 0 0 2px var(--c)}
+.osi-sim__layer.is-active,.osi-sim__layer.is-done{background:var(--bg);border-color:var(--c)}
+.osi-sim__net{display:flex;flex-direction:column;gap:.5rem;padding-top:2.55rem}
+.osi-sim__dev{border:1px dashed #afb8c1;border-radius:.5rem;padding:.4rem;text-align:center;font-size:.78rem;color:#636c76;transition:background .25s}
+.osi-sim__dev small{display:block;font-size:.68rem}
+.osi-sim__dev.is-active{border-style:solid;border-color:#1f2328;background:#fff8c5;color:#1f2328;font-weight:600}
+.osi-sim__wire{height:2px;background:repeating-linear-gradient(90deg,#afb8c1 0 6px,transparent 6px 10px);margin:.25rem 0}
+.osi-sim__where{margin-top:1rem;font-size:.78rem;color:#636c76}
+.osi-sim__packet{display:flex;flex-wrap:wrap;gap:3px;margin-top:.35rem;min-height:2rem}
+.osi-sim__chip{border:1px solid var(--c);background:var(--bg);color:#1f2328;border-radius:.3rem;padding:.2rem .45rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.72rem;line-height:1.3}
+.osi-sim__chip i{font-style:normal;font-weight:700;color:var(--c);margin-right:.3rem}
+.osi-sim__chip.is-read{box-shadow:0 0 0 2px var(--c);font-weight:600}
+.osi-sim__note{margin-top:.75rem;padding:.6rem .8rem;background:#f6f8fa;border-left:3px solid #0969da;border-radius:.25rem;min-height:3.5rem}
+.osi-sim__linux{margin-top:.5rem;font-size:.82rem;color:#1f2328}
+.osi-sim__linux b{color:#1a7f37}
+.osi-sim [data-l="7"]{--c:#8250df;--bg:#fbefff}
+.osi-sim [data-l="6"]{--c:#bf3989;--bg:#ffeff7}
+.osi-sim [data-l="5"]{--c:#cf222e;--bg:#ffebe9}
+.osi-sim [data-l="4"]{--c:#bc4c00;--bg:#fff1e5}
+.osi-sim [data-l="3"]{--c:#9a6700;--bg:#fff8c5}
+.osi-sim [data-l="2"]{--c:#1a7f37;--bg:#dafbe1}
+.osi-sim [data-l="1"]{--c:#0969da;--bg:#ddf4ff}
+@media (max-width:40rem){.osi-sim__stage{grid-template-columns:1fr 4.5rem 1fr;gap:.35rem}.osi-sim__title{min-height:5.4em;font-size:.65rem}.osi-sim__net{padding-top:4.6rem}.osi-sim__layer span{display:none}.osi-sim__layer{justify-content:center}.osi-sim__dev{font-size:.68rem;padding:.3rem .15rem}}
 </style>
 
 <script>
 (() => {
+  const LAYERS = ["", "Physical", "Data link", "Network", "Transport", "Session", "Presentation", "Application"];
   const T = {
     en: {
-      client: "Client", server: "Server", scenario: "Scenario",
-      back: "Back", next: "Next", play: "Play", pause: "Pause", reset: "Reset",
-      step: "Step", lost: "lost", empty: "# tcpdump -ni eth0 tcp (press Next)",
-      names: { normal: "Normal: open, send, close", loss: "Packet loss and fast retransmit", refused: "Port closed: refused", dropped: "Firewall drop: timeout" },
+      scenario: "Scenario", back: "Back", next: "Next", play: "Play", pause: "Pause", reset: "Reset", step: "Step",
+      linux: "In Linux:", down: "going down", up: "going up", transit: "in transit", start: "Press Next to start.",
+      names: { https: "HTTPS request to a web server", ping: "ping the home router", dns: "DNS lookup over UDP" },
+      devices: { switch: "Switch", router: "Router" },
     },
     id: {
-      client: "Klien", server: "Server", scenario: "Skenario",
-      back: "Mundur", next: "Lanjut", play: "Putar", pause: "Jeda", reset: "Ulang",
-      step: "Langkah", lost: "hilang", empty: "# tcpdump -ni eth0 tcp (tekan Lanjut)",
-      names: { normal: "Normal: buka, kirim, tutup", loss: "Paket hilang dan fast retransmit", refused: "Port tertutup: ditolak", dropped: "Dibuang firewall: timeout" },
+      scenario: "Skenario", back: "Mundur", next: "Lanjut", play: "Putar", pause: "Jeda", reset: "Ulang", step: "Langkah",
+      linux: "Di Linux:", down: "turun", up: "naik", transit: "di perjalanan", start: "Tekan Lanjut untuk mulai.",
+      names: { https: "Request HTTPS ke web server", ping: "ping ke router rumah", dns: "Pencarian DNS lewat UDP" },
+      devices: { switch: "Switch", router: "Router" },
     },
   };
-  const C = "10.0.0.1.51234", S80 = "10.0.0.2.80", S99 = "10.0.0.2.9999";
+  const c = (l, t) => ({ l, t });
+  const ETH1 = c(2, "ETH aa:..:10 → aa:..:01");
+  const FCS = c(2, "FCS");
+  const BITS = [c(1, "1011 0001 0111 0100 1010 1011 1010 1001 ...")];
+  const TLS = [c(6, "TLS record"), c(7, { en: "encrypted HTTP", id: "HTTP terenkripsi" })];
+  const TCP = c(4, "TCP :51234 → :443");
+  const IP1 = c(3, "IP 192.168.1.10 → 198.51.100.20 TTL 64");
+  const IP2 = c(3, "IP 203.0.113.7 → 198.51.100.20 TTL 63");
+  const ETH2 = c(2, "ETH bb:..:07 → cc:..:01");
   const SCENARIOS = {
-    normal: {
-      init: ["CLOSED", "LISTEN"],
+    https: {
+      left: { en: "Laptop 192.168.1.10", id: "Laptop 192.168.1.10" },
+      right: { en: "Server 198.51.100.20 (nginx)", id: "Server 198.51.100.20 (nginx)" },
+      devices: ["switch", "router"],
       intro: {
-        en: "The server program called listen() on port 80. The client is about to call connect().",
-        id: "Program server sudah memanggil listen() di port 80. Klien akan memanggil connect().",
+        en: "The browser already knows example.com is 198.51.100.20 (see the DNS scenario) and has an open TLS connection. Now it sends GET /.",
+        id: "Browser sudah tahu example.com adalah 198.51.100.20 (lihat skenario DNS) dan sudah punya koneksi TLS yang terbuka. Sekarang ia mengirim GET /.",
       },
       steps: [
-        { dir: ">", label: "SYN seq=1000", c: "SYN-SENT", s: "SYN-RECEIVED",
-          dump: `${C} > ${S80}: Flags [S], seq 1000, win 64240, options [mss 1460,sackOK,TS,wscale 7], length 0`,
-          en: "connect() makes the client kernel send a SYN with a random starting sequence number (1000 here) and its options. The server kernel puts a half-open entry in its SYN queue and answers.",
-          id: "connect() membuat kernel klien mengirim SYN dengan nomor urut awal acak (di sini 1000) beserta opsinya. Kernel server mencatat entri setengah jadi di SYN queue lalu menjawab." },
-        { dir: "<", label: "SYN+ACK seq=5000 ack=1001", c: "ESTABLISHED",
-          dump: `${S80} > ${C}: Flags [S.], seq 5000, ack 1001, win 65160, options [mss 1460,sackOK,TS,wscale 7], length 0`,
-          en: "The server sends its own SYN (seq 5000) and acknowledges the client's. ack=1001 means \"I have byte 1000, send 1001 next\". A SYN counts as one byte. The client is ESTABLISHED and connect() returns.",
-          id: "Server mengirim SYN miliknya (seq 5000) dan meng-ACK SYN klien. ack=1001 artinya \"byte 1000 sudah ada, kirim 1001 berikutnya\". SYN dihitung satu byte. Klien sudah ESTABLISHED dan connect() kembali." },
-        { dir: ">", label: "ACK ack=5001", s: "ESTABLISHED",
-          dump: `${C} > ${S80}: Flags [.], ack 5001, win 502, length 0`,
-          en: "The client acknowledges the server's SYN. The server kernel moves the connection to the accept queue, where accept() picks it up. No application code ran for any of these three packets.",
-          id: "Klien meng-ACK SYN server. Kernel server memindahkan koneksi ke accept queue, tempat accept() mengambilnya. Tidak ada kode aplikasi yang berjalan untuk ketiga paket ini." },
-        { dir: ">", label: "PSH,ACK seq=1001 len=100",
-          dump: `${C} > ${S80}: Flags [P.], seq 1001:1101, ack 5001, win 502, length 100: HTTP: GET / HTTP/1.1`,
-          en: "The client calls write() with a 100-byte request. The kernel copies it into the send buffer and sends one segment. seq=1001 is the number of its first byte.",
-          id: "Klien memanggil write() dengan request 100 byte. Kernel menyalinnya ke buffer kirim dan mengirim satu segmen. seq=1001 adalah nomor byte pertamanya." },
-        { dir: "<", label: "PSH,ACK seq=5001 ack=1101 len=300",
-          dump: `${S80} > ${C}: Flags [P.], seq 5001:5301, ack 1101, win 509, length 300: HTTP: HTTP/1.1 200 OK`,
-          en: "The server acknowledges the request (1001 + 100 = 1101) and carries the 300-byte response in the same segment. One packet carries both data and an ACK.",
-          id: "Server meng-ACK request (1001 + 100 = 1101) sekaligus membawa respons 300 byte di segmen yang sama. Satu paket membawa data dan ACK." },
-        { dir: ">", label: "ACK ack=5301",
-          dump: `${C} > ${S80}: Flags [.], ack 5301, win 501, length 0`,
-          en: "The client confirms the 300 bytes. If this ACK were lost, the server would resend the response when its retransmission timer fires.",
-          id: "Klien mengonfirmasi 300 byte itu. Kalau ACK ini hilang, server akan mengirim ulang responsnya saat timer retransmisi berbunyi." },
-        { dir: ">", label: "FIN,ACK seq=1101", c: "FIN-WAIT-1", s: "CLOSE-WAIT",
-          dump: `${C} > ${S80}: Flags [F.], seq 1101, ack 5301, win 501, length 0`,
-          en: "The client calls close(), so its kernel sends FIN: \"I will send no more\". The server enters CLOSE-WAIT, and its next read() returns 0. It stays there until the server program calls close().",
-          id: "Klien memanggil close(), jadi kernelnya mengirim FIN: \"aku tidak akan mengirim lagi\". Server masuk CLOSE-WAIT, dan read() berikutnya mengembalikan 0. Ia tetap di sana sampai program server memanggil close()." },
-        { dir: "<", label: "ACK ack=1102", c: "FIN-WAIT-2",
-          dump: `${S80} > ${C}: Flags [.], ack 1102, win 509, length 0`,
-          en: "The server kernel acknowledges the FIN, which also counts as one byte. One direction is closed. The server could still send data.",
-          id: "Kernel server meng-ACK FIN tersebut, yang juga dihitung satu byte. Satu arah sudah tertutup. Server masih bisa mengirim data." },
-        { dir: "<", label: "FIN,ACK seq=5301", c: "TIME-WAIT", s: "LAST-ACK",
-          dump: `${S80} > ${C}: Flags [F.], seq 5301, ack 1102, win 509, length 0`,
-          en: "The server program calls close(), and its kernel sends its own FIN. The client enters TIME-WAIT.",
-          id: "Program server memanggil close(), dan kernelnya mengirim FIN miliknya. Klien masuk TIME-WAIT." },
-        { dir: ">", label: "ACK ack=5302", s: "CLOSED",
-          dump: `${C} > ${S80}: Flags [.], ack 5302, win 501, length 0`,
-          en: "The client acknowledges the server's FIN. The server forgets the connection.",
-          id: "Klien meng-ACK FIN dari server. Server melupakan koneksinya." },
-        { dir: "!", label: "60 s later", label_id: "60 detik kemudian", c: "CLOSED",
-          en: "Linux keeps TIME-WAIT for 60 seconds, so it can ACK a retransmitted FIN and so late packets cannot leak into a new connection with the same ports. The side that closes first pays this cost.",
-          id: "Linux menahan TIME-WAIT selama 60 detik, supaya bisa meng-ACK FIN yang dikirim ulang dan supaya paket telat tidak bocor ke koneksi baru dengan port yang sama. Sisi yang menutup duluan menanggung biaya ini." },
+        { at: "L", l: 7, pkt: [c(7, "GET / HTTP/1.1  Host: example.com")],
+          en: "The browser writes the HTTP request. This is plain text that any HTTP server understands.",
+          id: "Browser menulis request HTTP. Ini teks biasa yang dimengerti semua server HTTP.",
+          lx: { en: "User space. The browser or curl process.", id: "User space. Proses browser atau curl." } },
+        { at: "L", l: 6, pkt: [...TLS],
+          en: "TLS encrypts the request with the keys agreed during the handshake. From here on, nobody between the two machines can read or change the HTTP.",
+          id: "TLS mengenkripsi request dengan kunci yang disepakati saat handshake. Mulai di sini, tidak ada yang di antara kedua mesin bisa membaca atau mengubah HTTP-nya.",
+          lx: { en: "User space. OpenSSL (BoringSSL in Chrome) inside the same process. With kTLS, the kernel can do the encryption instead.", id: "User space. OpenSSL (BoringSSL di Chrome) di dalam proses yang sama. Dengan kTLS, kernel bisa mengerjakan enkripsinya." } },
+        { at: "L", l: 5, pkt: [...TLS],
+          en: "Layer 5 adds no header here. The TLS session already exists, so this request reuses it with no new handshake. Not every layer adds bytes.",
+          id: "Layer 5 tidak menambah header di sini. Sesi TLS sudah ada, jadi request ini memakainya ulang tanpa handshake baru. Tidak semua lapisan menambah byte.",
+          lx: { en: "User space. The TLS library keeps the session keys. HTTP/2 streams also live at this level.", id: "User space. Library TLS menyimpan kunci sesi. Stream HTTP/2 juga ada di level ini." } },
+        { at: "L", l: 4, pkt: [TCP, ...TLS],
+          en: "The program calls write() on the socket. The kernel adds a TCP header with the source port (51234, picked by the kernel) and the destination port (443), plus sequence numbers.",
+          id: "Program memanggil write() pada socket. Kernel menambahkan header TCP berisi port sumber (51234, dipilih kernel) dan port tujuan (443), plus sequence number.",
+          lx: { en: "Kernel. This is where user space ends. TCP keeps a copy until the server acknowledges it.", id: "Kernel. Di sinilah user space berakhir. TCP menyimpan salinannya sampai server meng-ACK." } },
+        { at: "L", l: 3, pkt: [IP1, TCP, ...TLS],
+          en: "The kernel adds the IP header. The server is not on the local network, so the routing table says to send it via the gateway 192.168.1.1.",
+          id: "Kernel menambahkan header IP. Server tidak ada di jaringan lokal, jadi tabel routing menyuruh mengirimnya lewat gateway 192.168.1.1.",
+          lx: { en: "Kernel. ip route get 198.51.100.20 shows this decision. nftables output rules run here.", id: "Kernel. ip route get 198.51.100.20 menunjukkan keputusan ini. Aturan output nftables berjalan di sini." } },
+        { at: "L", l: 2, pkt: [ETH1, IP1, TCP, ...TLS, FCS],
+          en: "The kernel adds the Ethernet header. The destination MAC is the router's (aa:..:01), not the server's. The IP header still points at the server.",
+          id: "Kernel menambahkan header Ethernet. MAC tujuannya milik router (aa:..:01), bukan milik server. Header IP tetap menunjuk ke server.",
+          lx: { en: "Kernel and driver. The MAC comes from the ARP table (ip neigh). The frame waits in the qdisc, then goes to the driver.", id: "Kernel dan driver. MAC-nya diambil dari tabel ARP (ip neigh). Frame menunggu di qdisc, lalu masuk ke driver." } },
+        { at: "L", l: 1, pkt: BITS,
+          en: "The network card turns the frame into electrical signals on the cable (or radio waves on Wi-Fi).",
+          id: "Kartu jaringan mengubah frame menjadi sinyal listrik di kabel (atau gelombang radio di Wi-Fi).",
+          lx: { en: "Hardware. The card reads the frame from RAM with DMA. ip -s link counts the TX packet.", id: "Hardware. Kartu membaca frame dari RAM lewat DMA. ip -s link menghitung paket TX-nya." } },
+        { at: "switch", l: 2, pkt: [ETH1, IP1, TCP, ...TLS, FCS], read: [0],
+          en: "The switch reads only the destination MAC, finds which port the router is on, and sends the frame out of that port. It never looks at the IP header.",
+          id: "Switch hanya membaca MAC tujuan, mencari port tempat router berada, lalu mengirim frame keluar dari port itu. Switch tidak pernah melihat header IP.",
+          lx: { en: "A Linux bridge such as docker0 does the same job in software.", id: "Bridge Linux seperti docker0 mengerjakan hal yang sama secara software." } },
+        { at: "router", l: 3, pkt: [ETH2, IP2, TCP, ...TLS, c(2, "FCS")], read: [0, 1],
+          en: "The router removes the old Ethernet header, reads the destination IP, lowers TTL from 64 to 63, and uses NAT to replace the private source IP with its public one. It then builds a new Ethernet header for the next link.",
+          id: "Router melepas header Ethernet lama, membaca IP tujuan, menurunkan TTL dari 64 ke 63, dan memakai NAT untuk mengganti IP sumber privat dengan IP publiknya. Lalu ia membuat header Ethernet baru untuk link berikutnya.",
+          lx: { en: "Many home routers run Linux. ip_forward=1 does the routing and an nftables masquerade rule does the NAT.", id: "Banyak router rumah menjalankan Linux. ip_forward=1 mengerjakan routing dan aturan masquerade nftables mengerjakan NAT." } },
+        { at: "R", l: 1, pkt: BITS,
+          en: "Many routers later, the server's network card receives the signals and checks the FCS checksum.",
+          id: "Setelah banyak router, kartu jaringan server menerima sinyalnya dan mengecek checksum FCS.",
+          lx: { en: "Hardware. The card writes the frame to RAM and raises an interrupt. The driver collects it with NAPI polling.", id: "Hardware. Kartu menulis frame ke RAM lalu memicu interrupt. Driver mengambilnya dengan polling NAPI." } },
+        { at: "R", l: 2, pkt: [c(2, "ETH ee:..:01 → ee:..:20"), IP2, TCP, ...TLS, c(2, "FCS")], read: [0],
+          en: "The destination MAC is the server's own, so the kernel accepts the frame and removes the Ethernet header and FCS.",
+          id: "MAC tujuannya milik server sendiri, jadi kernel menerima frame lalu melepas header Ethernet dan FCS-nya.",
+          lx: { en: "Kernel and driver. A frame for another MAC is dropped here, unless the card is in promiscuous mode, which tcpdump turns on.", id: "Kernel dan driver. Frame untuk MAC lain dibuang di sini, kecuali kartu dalam mode promiscuous, yang dinyalakan tcpdump." } },
+        { at: "R", l: 3, pkt: [IP2, TCP, ...TLS], read: [0],
+          en: "The destination IP belongs to this server, so the kernel removes the IP header and passes the rest to TCP.",
+          id: "IP tujuannya milik server ini, jadi kernel melepas header IP dan meneruskan sisanya ke TCP.",
+          lx: { en: "Kernel. nftables prerouting and input rules run here. A drop rule would stop the packet at this point.", id: "Kernel. Aturan prerouting dan input nftables berjalan di sini. Aturan drop akan menghentikan paket di titik ini." } },
+        { at: "R", l: 4, pkt: [TCP, ...TLS], read: [0],
+          en: "Port 443 belongs to nginx's socket. TCP checks the sequence number, sends an ACK back, and puts the bytes in the socket's receive buffer.",
+          id: "Port 443 milik socket nginx. TCP mengecek sequence number, mengirim ACK balik, dan menaruh byte-nya di buffer terima socket.",
+          lx: { en: "Kernel. ss -tn 'sport = :443' shows this connection.", id: "Kernel. ss -tn 'sport = :443' menampilkan koneksi ini." } },
+        { at: "R", l: 5, pkt: [...TLS],
+          en: "nginx's read() returns the bytes. The TLS library finds the session for this connection.",
+          id: "read() milik nginx mengembalikan byte-nya. Library TLS menemukan sesi untuk koneksi ini.",
+          lx: { en: "User space. From here up, everything runs inside the nginx process.", id: "User space. Dari sini ke atas, semuanya berjalan di dalam proses nginx." } },
+        { at: "R", l: 6, pkt: [c(7, "GET / HTTP/1.1  Host: example.com")],
+          en: "OpenSSL decrypts the record and checks that nobody changed it on the way.",
+          id: "OpenSSL mendekripsi record itu dan mengecek bahwa tidak ada yang mengubahnya di jalan.",
+          lx: { en: "User space. OpenSSL inside nginx.", id: "User space. OpenSSL di dalam nginx." } },
+        { at: "R", l: 7, pkt: [c(7, "GET / HTTP/1.1  Host: example.com")], read: [0],
+          en: "nginx reads GET / and the Host header, picks the matching server block, and answers. The response travels down the same seven layers and back.",
+          id: "nginx membaca GET / dan header Host, memilih server block yang cocok, lalu menjawab. Responsnya melewati tujuh lapisan yang sama, turun lalu naik lagi.",
+          lx: { en: "User space. nginx, logged in /var/log/nginx/access.log.", id: "User space. nginx, tercatat di /var/log/nginx/access.log." } },
       ],
     },
-    loss: {
-      init: ["ESTABLISHED", "ESTABLISHED"],
+    ping: {
+      left: { en: "Laptop 192.168.1.10", id: "Laptop 192.168.1.10" },
+      right: { en: "Home router 192.168.1.1", id: "Router rumah 192.168.1.1" },
+      devices: ["switch"],
+      top: 3,
       intro: {
-        en: "The connection is already open. The client uploads in 1000-byte segments. Watch what happens when one of them disappears.",
-        id: "Koneksi sudah terbuka. Klien mengunggah dalam segmen 1000 byte. Perhatikan apa yang terjadi saat salah satunya hilang.",
+        en: "Run ping 192.168.1.1. The laptop does not know the router's MAC address yet.",
+        id: "Jalankan ping 192.168.1.1. Laptop belum tahu alamat MAC router.",
       },
       steps: [
-        { dir: ">", label: "seq=1001 len=1000",
-          dump: `${C} > ${S80}: Flags [.], seq 1001:2001, ack 5001, length 1000`,
-          en: "Segment 1 arrives.", id: "Segmen 1 sampai." },
-        { dir: "<", label: "ACK ack=2001",
-          dump: `${S80} > ${C}: Flags [.], ack 2001, length 0`,
-          en: "The server acknowledges every byte up to 2000.", id: "Server meng-ACK semua byte sampai 2000." },
-        { dir: ">", label: "seq=2001 len=1000", lost: true,
-          dump: `${C} > ${S80}: Flags [.], seq 2001:3001, ack 5001, length 1000   (never arrives)`,
-          en: "Segment 2 is dropped on the way, for example by a full router queue. Nobody tells the client.",
-          id: "Segmen 2 dibuang di jalan, misalnya oleh antrean router yang penuh. Tidak ada yang memberi tahu klien." },
-        { dir: ">", label: "seq=3001 len=1000",
-          dump: `${C} > ${S80}: Flags [.], seq 3001:4001, ack 5001, length 1000`,
-          en: "Segment 3 arrives, but there is a hole before it. The server keeps it in the out-of-order queue and cannot give it to the application yet.",
-          id: "Segmen 3 sampai, tetapi ada lubang sebelumnya. Server menyimpannya di antrean out-of-order dan belum bisa memberikannya ke aplikasi." },
-        { dir: "<", label: "ACK 2001 sack 3001-4001",
-          dump: `${S80} > ${C}: Flags [.], ack 2001, options [sack 1 {3001:4001}], length 0`,
-          en: "Duplicate ACK 1. The server repeats ack=2001. The SACK option adds \"but I do have 3001 to 4000\".",
-          id: "Duplicate ACK 1. Server mengulang ack=2001. Opsi SACK menambahkan \"tapi 3001 sampai 4000 sudah ada\"." },
-        { dir: ">", label: "seq=4001 len=1000",
-          dump: `${C} > ${S80}: Flags [.], seq 4001:5001, ack 5001, length 1000`,
-          en: "Segment 4 arrives and joins the out-of-order queue.", id: "Segmen 4 sampai dan masuk antrean out-of-order." },
-        { dir: "<", label: "ACK 2001 sack 3001-5001",
-          dump: `${S80} > ${C}: Flags [.], ack 2001, options [sack 1 {3001:5001}], length 0`,
-          en: "Duplicate ACK 2.", id: "Duplicate ACK 2." },
-        { dir: ">", label: "seq=5001 len=1000",
-          dump: `${C} > ${S80}: Flags [.], seq 5001:6001, ack 5001, length 1000`,
-          en: "Segment 5 arrives.", id: "Segmen 5 sampai." },
-        { dir: "<", label: "ACK 2001 sack 3001-6001",
-          dump: `${S80} > ${C}: Flags [.], ack 2001, options [sack 1 {3001:6001}], length 0`,
-          en: "Duplicate ACK 3. The client now knows exactly which 1000 bytes are missing.",
-          id: "Duplicate ACK 3. Klien sekarang tahu persis 1000 byte mana yang hilang." },
-        { dir: ">", label: "seq=2001 len=1000 (retransmit)",
-          dump: `${C} > ${S80}: Flags [.], seq 2001:3001, ack 5001, length 1000`,
-          en: "This is fast retransmit. The client resends only the missing segment, without waiting for the retransmission timer. CUBIC cuts the congestion window to 70%, because loss usually means a queue is full somewhere.",
-          id: "Ini fast retransmit. Klien hanya mengirim ulang segmen yang hilang, tanpa menunggu timer retransmisi. CUBIC memotong congestion window menjadi 70%, karena kehilangan paket biasanya berarti ada antrean yang penuh." },
-        { dir: "<", label: "ACK ack=6001",
-          dump: `${S80} > ${C}: Flags [.], ack 6001, length 0`,
-          en: "The hole is filled. One cumulative ACK covers everything, and the kernel hands bytes 2001 to 6000 to the application in order. The application saw a short delay, not the loss.",
-          id: "Lubangnya terisi. Satu ACK kumulatif mencakup semuanya, dan kernel menyerahkan byte 2001 sampai 6000 ke aplikasi secara berurutan. Aplikasi hanya melihat jeda singkat, bukan kehilangannya." },
+        { at: "L", l: 3, pkt: [c(3, "IP 192.168.1.10 → 192.168.1.1"), c(3, "ICMP echo request seq=1")],
+          en: "ping asks the kernel to send an ICMP echo request. ICMP goes directly inside the IP packet. There is no TCP, no UDP, and no port number.",
+          id: "ping meminta kernel mengirim ICMP echo request. ICMP langsung berada di atas IP. Tidak ada TCP, tidak ada UDP, dan tidak ada nomor port.",
+          lx: { en: "ping opens an unprivileged ICMP socket, so it needs no root. The kernel builds the IP header.", id: "ping membuka socket ICMP tanpa hak khusus, jadi tidak butuh root. Kernel yang membuat header IP." } },
+        { at: "L", l: 2, pkt: [c(2, "ETH aa:..:10 → ff:ff:ff:ff:ff:ff"), c(2, "ARP who-has 192.168.1.1 tell 192.168.1.10")],
+          en: "The kernel has no MAC address for 192.168.1.1, so it holds the ping and broadcasts an ARP request to every machine on the LAN.",
+          id: "Kernel tidak punya alamat MAC untuk 192.168.1.1, jadi ia menahan ping dan menyiarkan request ARP ke semua mesin di LAN.",
+          lx: { en: "Kernel. ip neigh shows 192.168.1.1 as INCOMPLETE while it waits.", id: "Kernel. ip neigh menampilkan 192.168.1.1 sebagai INCOMPLETE selama menunggu." } },
+        { at: "switch", l: 2, pkt: [c(2, "ETH aa:..:10 → ff:ff:ff:ff:ff:ff"), c(2, "ARP who-has 192.168.1.1")], read: [0],
+          en: "ff:ff:ff:ff:ff:ff is the broadcast address, so the switch copies the frame out of every port. It also learns which port aa:..:10 is behind.",
+          id: "ff:ff:ff:ff:ff:ff adalah alamat broadcast, jadi switch menyalin frame ke semua port. Switch juga mempelajari port tempat aa:..:10 berada.",
+          lx: { en: "bridge fdb show lists what a Linux bridge has learned.", id: "bridge fdb show menampilkan apa yang sudah dipelajari bridge Linux." } },
+        { at: "R", l: 2, dir: "down", pkt: [c(2, "ETH aa:..:01 → aa:..:10"), c(2, "ARP 192.168.1.1 is-at aa:..:01")],
+          en: "The router sees its own IP in the request and replies directly to the laptop with its MAC address.",
+          id: "Router melihat IP miliknya di request itu dan membalas langsung ke laptop dengan alamat MAC-nya.",
+          lx: { en: "Kernel. Linux answers ARP by itself, no program is involved.", id: "Kernel. Linux menjawab ARP sendiri, tanpa melibatkan program apa pun." } },
+        { at: "L", l: 2, pkt: [c(2, "ETH aa:..:10 → aa:..:01"), c(3, "IP 192.168.1.10 → 192.168.1.1"), c(3, "ICMP echo request seq=1")],
+          en: "The laptop saves the answer and sends the waiting ping in a normal Ethernet frame addressed to the router's MAC.",
+          id: "Laptop menyimpan jawabannya dan mengirim ping yang tertunda dalam frame Ethernet biasa yang ditujukan ke MAC router.",
+          lx: { en: "Kernel. ip neigh now shows 192.168.1.1 lladdr aa:..:01 REACHABLE.", id: "Kernel. ip neigh sekarang menampilkan 192.168.1.1 lladdr aa:..:01 REACHABLE." } },
+        { at: "switch", l: 2, pkt: [c(2, "ETH aa:..:10 → aa:..:01"), c(3, "IP"), c(3, "ICMP echo request")], read: [0],
+          en: "The switch learned the router's port from the ARP reply, so this frame goes out of one port only.",
+          id: "Switch sudah mempelajari port router dari balasan ARP, jadi frame ini keluar dari satu port saja.",
+          lx: { en: "Same job as a Linux bridge forwarding table.", id: "Sama seperti tabel forwarding bridge Linux." } },
+        { at: "R", l: 3, dir: "up", pkt: [c(3, "IP 192.168.1.1 → 192.168.1.10"), c(3, "ICMP echo reply seq=1")],
+          en: "The router's kernel sees an echo request for its own IP and sends an echo reply. No program runs on the router for this.",
+          id: "Kernel router melihat echo request untuk IP miliknya dan mengirim echo reply. Tidak ada program yang berjalan di router untuk ini.",
+          lx: { en: "Kernel. Setting net.ipv4.icmp_echo_ignore_all=1 makes Linux stop answering pings.", id: "Kernel. Mengatur net.ipv4.icmp_echo_ignore_all=1 membuat Linux berhenti menjawab ping." } },
+        { at: "L", l: 3, dir: "up", pkt: [c(3, "ICMP echo reply seq=1")], read: [0],
+          en: "ping prints \"64 bytes from 192.168.1.1: icmp_seq=1 time=0.55 ms\". This proves layers 1 to 3 work between the two machines. It says nothing about TCP ports, TLS, or HTTP.",
+          id: "ping mencetak \"64 bytes from 192.168.1.1: icmp_seq=1 time=0.55 ms\". Ini membuktikan layer 1 sampai 3 berjalan di antara kedua mesin. Ini tidak membuktikan apa pun soal port TCP, TLS, atau HTTP.",
+          lx: { en: "User space. The ping program reads the reply from its ICMP socket.", id: "User space. Program ping membaca balasan dari socket ICMP-nya." } },
       ],
     },
-    refused: {
-      init: ["CLOSED", "CLOSED"],
+    dns: {
+      left: { en: "Laptop 192.168.1.10", id: "Laptop 192.168.1.10" },
+      right: { en: "DNS resolver 1.1.1.1", id: "Resolver DNS 1.1.1.1" },
+      devices: ["switch", "router"],
       intro: {
-        en: "The server machine is up, but no program listens on port 9999.",
-        id: "Mesin server menyala, tetapi tidak ada program yang listen di port 9999.",
+        en: "The browser needs the IP address of example.com before it can connect.",
+        id: "Browser butuh alamat IP example.com sebelum bisa tersambung.",
       },
       steps: [
-        { dir: ">", label: "SYN seq=1000", c: "SYN-SENT",
-          dump: `${C} > ${S99}: Flags [S], seq 1000, win 64240, options [mss 1460,sackOK,TS,wscale 7], length 0`,
-          en: "The client sends a SYN to port 9999.", id: "Klien mengirim SYN ke port 9999." },
-        { dir: "<", label: "RST,ACK ack=1001", c: "CLOSED",
-          dump: `${S99} > ${C}: Flags [R.], seq 0, ack 1001, win 0, length 0`,
-          en: "No socket listens on that port, so the server kernel answers RST. connect() fails at once with ECONNREFUSED, \"Connection refused\". A refusal proves the host is up and reachable. Only the port is closed.",
-          id: "Tidak ada socket yang listen di port itu, jadi kernel server menjawab RST. connect() langsung gagal dengan ECONNREFUSED, \"Connection refused\". Penolakan membuktikan host-nya menyala dan terjangkau. Hanya port-nya yang tertutup." },
-      ],
-    },
-    dropped: {
-      init: ["CLOSED", "LISTEN"],
-      intro: {
-        en: "The server program listens on port 9999, but a firewall in front of it drops those packets (nftables: tcp dport 9999 drop).",
-        id: "Program server listen di port 9999, tetapi firewall di depannya membuang paket ke sana (nftables: tcp dport 9999 drop).",
-      },
-      steps: [
-        { dir: ">", label: "t=0s SYN seq=1000", lost: true, c: "SYN-SENT",
-          dump: `00:00:00.000 ${C} > ${S99}: Flags [S], seq 1000, length 0`,
-          en: "The client sends a SYN. The firewall drops it without a reply.",
-          id: "Klien mengirim SYN. Firewall membuangnya tanpa balasan." },
-        { dir: ">", label: "t=1s SYN (retry 1)", lost: true,
-          dump: `00:00:01.024 ${C} > ${S99}: Flags [S], seq 1000, length 0`,
-          en: "No answer after 1 second, the initial timeout. The kernel sends the same SYN again.",
-          id: "Tidak ada jawaban setelah 1 detik, timeout awal. Kernel mengirim SYN yang sama lagi." },
-        { dir: ">", label: "t=3s SYN (retry 2)", lost: true,
-          dump: `00:00:03.072 ${C} > ${S99}: Flags [S], seq 1000, length 0`,
-          en: "The wait doubles after every try: 1, 2, 4, 8, 16, 32 seconds.",
-          id: "Waktu tunggu berlipat dua setiap kali: 1, 2, 4, 8, 16, 32 detik." },
-        { dir: ">", label: "t=7s SYN (retry 3)", lost: true,
-          dump: `00:00:07.168 ${C} > ${S99}: Flags [S], seq 1000, length 0`,
-          en: "Still nothing. The server program never sees any of these SYNs and stays in LISTEN.",
-          id: "Masih tidak ada apa-apa. Program server tidak pernah melihat SYN ini dan tetap di LISTEN." },
-        { dir: "!", label: "retries at 15s, 31s, 63s ...", label_id: "coba lagi di 15, 31, 63 dtk ...",
-          dump: `00:00:15.360 ...\n00:00:31.744 ...\n00:01:03.488 ...`,
-          en: "Three more retries, each also dropped.", id: "Tiga kali coba lagi, semuanya juga dibuang." },
-        { dir: "!", label: "t≈127s connect() → ETIMEDOUT", label_id: "t≈127 dtk connect() → ETIMEDOUT", c: "CLOSED",
-          en: "With tcp_syn_retries = 6, Linux gives up after about 127 seconds. A timeout means something dropped the packet: a firewall, a dead host, a wrong route. Compare the refused scenario, which fails within milliseconds.",
-          id: "Dengan tcp_syn_retries = 6, Linux menyerah setelah sekitar 127 detik. Timeout berarti ada yang membuang paket: firewall, host mati, rute salah. Bandingkan dengan skenario ditolak, yang gagal dalam hitungan milidetik." },
+        { at: "L", l: 7, pkt: [c(7, "DNS query id=0x1a2b  A example.com?")],
+          en: "The program calls getaddrinfo(\"example.com\"). A DNS query is a small binary message asking for the A record (IPv4 address).",
+          id: "Program memanggil getaddrinfo(\"example.com\"). Query DNS adalah pesan biner kecil yang menanyakan record A (alamat IPv4).",
+          lx: { en: "User space. glibc asks systemd-resolved on 127.0.0.53, which asks the upstream resolver shown in resolvectl status.", id: "User space. glibc bertanya ke systemd-resolved di 127.0.0.53, yang bertanya ke resolver upstream di resolvectl status." } },
+        { at: "L", l: 6, pkt: [c(7, "DNS query id=0x1a2b  A example.com?")],
+          en: "Plain DNS has no encryption and no session, so layers 6 and 5 add nothing. Anyone on the path can read which names you look up. DNS over TLS or HTTPS adds encryption here.",
+          id: "DNS biasa tidak punya enkripsi dan tidak punya sesi, jadi layer 6 dan 5 tidak menambah apa pun. Siapa pun di jalur bisa membaca nama yang kamu cari. DNS over TLS atau HTTPS menambahkan enkripsi di sini.",
+          lx: { en: "resolvectl status shows whether DNSOverTLS is on.", id: "resolvectl status menunjukkan apakah DNSOverTLS menyala." } },
+        { at: "L", l: 4, pkt: [c(4, "UDP :53001 → :53"), c(7, "DNS query A example.com?")],
+          en: "The kernel adds an 8-byte UDP header. There is no handshake. The first packet already carries the question.",
+          id: "Kernel menambahkan header UDP 8 byte. Tidak ada handshake. Paket pertama langsung membawa pertanyaannya.",
+          lx: { en: "Kernel. sendto() on a UDP socket. The kernel keeps no copy for resending.", id: "Kernel. sendto() pada socket UDP. Kernel tidak menyimpan salinan untuk dikirim ulang." } },
+        { at: "L", l: 3, pkt: [c(3, "IP 192.168.1.10 → 1.1.1.1 TTL 64"), c(4, "UDP :53001 → :53"), c(7, "DNS query")],
+          en: "The kernel adds the IP header. 1.1.1.1 is not local, so the packet goes via the default gateway.",
+          id: "Kernel menambahkan header IP. 1.1.1.1 tidak lokal, jadi paketnya lewat default gateway.",
+          lx: { en: "Kernel. ip route get 1.1.1.1", id: "Kernel. ip route get 1.1.1.1" } },
+        { at: "L", l: 2, pkt: [c(2, "ETH aa:..:10 → aa:..:01"), c(3, "IP → 1.1.1.1"), c(4, "UDP → :53"), c(7, "DNS query"), c(2, "FCS")],
+          en: "The Ethernet header is addressed to the router's MAC, which the kernel already has in its ARP table.",
+          id: "Header Ethernet ditujukan ke MAC router, yang sudah ada di tabel ARP kernel.",
+          lx: { en: "Kernel and driver.", id: "Kernel dan driver." } },
+        { at: "router", l: 3, pkt: [c(2, "ETH (new)"), c(3, "IP 203.0.113.7 → 1.1.1.1 TTL 63"), c(4, "UDP :40001 → :53"), c(7, "DNS query")], read: [1, 2],
+          en: "The router applies NAT and rewrites the source IP and port. It remembers the mapping so the answer can find its way back, even though UDP has no connection.",
+          id: "Router menerapkan NAT dan menulis ulang IP dan port sumber. Ia mengingat pemetaan itu supaya jawabannya bisa kembali, walaupun UDP tidak punya koneksi.",
+          lx: { en: "On a Linux router, conntrack keeps this mapping. conntrack -L lists it.", id: "Di router Linux, conntrack menyimpan pemetaan ini. conntrack -L menampilkannya." } },
+        { at: "R", l: 4, pkt: [c(4, "UDP :40001 → :53"), c(7, "DNS query A example.com?")], read: [0],
+          en: "At the resolver, the kernel removes the lower headers. Port 53 leads to the resolver program.",
+          id: "Di resolver, kernel melepas header bawah. Port 53 mengarah ke program resolver.",
+          lx: { en: "Kernel, then the resolver process (for example unbound or BIND on Linux).", id: "Kernel, lalu proses resolver (misalnya unbound atau BIND di Linux)." } },
+        { at: "R", l: 7, dir: "down", pkt: [c(7, "DNS answer id=0x1a2b  example.com A 198.51.100.20 TTL 300")], read: [0],
+          en: "The resolver answers with the IP address and a TTL of 300 seconds, which says how long the answer may be cached. The reply goes back down the layers.",
+          id: "Resolver menjawab dengan alamat IP dan TTL 300 detik, yang menentukan berapa lama jawabannya boleh disimpan di cache. Balasannya turun lagi melewati lapisan.",
+          lx: { en: "User space. This DNS TTL is a layer 7 field, unrelated to the IP TTL at layer 3.", id: "User space. TTL DNS ini field layer 7, tidak ada hubungannya dengan TTL IP di layer 3." } },
+        { at: "L", l: 7, dir: "up", pkt: [c(7, "example.com → 198.51.100.20")], read: [0],
+          en: "The answer arrives and getaddrinfo() returns. If a UDP packet had been lost, the kernel would not resend it. The resolver retries after its own timeout (5 seconds in glibc by default). Now the HTTPS scenario can start.",
+          id: "Jawabannya tiba dan getaddrinfo() kembali. Kalau paket UDP-nya hilang, kernel tidak akan mengirim ulang. Resolver mencoba lagi setelah timeout-nya sendiri (bawaannya 5 detik di glibc). Sekarang skenario HTTPS bisa dimulai.",
+          lx: { en: "User space. resolvectl statistics shows cache hits.", id: "User space. resolvectl statistics menampilkan cache hit." } },
       ],
     },
   };
@@ -1371,11 +1168,11 @@ Jangan menyalin daftar tuning dari blog. Sebagian besar nilai bawaan sudah tepat
     return node;
   };
 
-  document.querySelectorAll(".tcp-sim").forEach((root) => {
+  document.querySelectorAll(".osi-sim").forEach((root) => {
     const lang = root.dataset.simLang === "id" ? "id" : "en";
     const t = T[lang];
 
-    const bar = el("div", "tcp-sim__bar");
+    const bar = el("div", "osi-sim__bar");
     const select = el("select");
     select.setAttribute("aria-label", t.scenario);
     Object.keys(SCENARIOS).forEach((key) => select.appendChild(new Option(t.names[key], key)));
@@ -1383,37 +1180,40 @@ Jangan menyalin daftar tuning dari blog. Sebagian besar nilai bawaan sudah tepat
     const next = el("button", null, `${t.next} ▶`);
     const play = el("button", null, t.play);
     const reset = el("button", null, t.reset);
-    const count = el("span", "tcp-sim__count");
+    const count = el("span", "osi-sim__count");
     [back, next, play, reset].forEach((b) => (b.type = "button"));
     bar.append(select, back, next, play, reset, count);
 
-    const hosts = el("div", "tcp-sim__hosts");
-    const clientState = el("div", "tcp-sim__state");
-    const serverState = el("div", "tcp-sim__state");
-    const clientBox = el("div", "tcp-sim__host");
-    const serverBox = el("div", "tcp-sim__host");
-    clientBox.append(el("b", null, `${t.client} 10.0.0.1`), clientState);
-    serverBox.append(el("b", null, `${t.server} 10.0.0.2`), serverState);
-    hosts.append(clientBox, serverBox);
+    const makeStack = () => {
+      const wrap = el("div");
+      const title = el("div", "osi-sim__title");
+      const stack = el("div", "osi-sim__stack");
+      const rows = {};
+      for (let l = 7; l >= 1; l -= 1) {
+        const row = el("div", "osi-sim__layer");
+        row.dataset.l = String(l);
+        row.append(el("b", null, `L${l}`), el("span", null, LAYERS[l]));
+        rows[l] = row;
+        stack.append(row);
+      }
+      wrap.append(title, stack);
+      return { wrap, title, rows };
+    };
+    const left = makeStack();
+    const right = makeStack();
+    const net = el("div", "osi-sim__net");
+    const stage = el("div", "osi-sim__stage");
+    stage.append(left.wrap, net, right.wrap);
 
-    const ladder = el("div", "tcp-sim__ladder");
-    const note = el("div", "tcp-sim__note");
+    const where = el("div", "osi-sim__where");
+    const packet = el("div", "osi-sim__packet");
+    const note = el("div", "osi-sim__note");
     note.setAttribute("aria-live", "polite");
-    const dump = el("pre", "tcp-sim__dump");
-
-    root.append(bar, hosts, ladder, note, dump);
+    const linux = el("div", "osi-sim__linux");
+    root.append(bar, stage, where, packet, note, linux);
 
     let pos = 0;
     let timer = null;
-
-    const setState = (node, value) => {
-      if (node.textContent !== value) {
-        node.textContent = value;
-        node.classList.remove("is-changed");
-        void node.offsetWidth;
-        node.classList.add("is-changed");
-      }
-    };
 
     const stop = () => {
       clearInterval(timer);
@@ -1423,28 +1223,50 @@ Jangan menyalin daftar tuning dari blog. Sebagian besar nilai bawaan sudah tepat
 
     const render = () => {
       const sc = SCENARIOS[select.value];
-      let c = sc.init[0];
-      let s = sc.init[1];
-      const lines = [];
-      ladder.replaceChildren();
-      sc.steps.slice(0, pos).forEach((step, i) => {
-        if (step.c) c = step.c;
-        if (step.s) s = step.s;
-        if (step.dump) lines.push(step.dump);
-        const kind = step.dir === ">" ? "right" : step.dir === "<" ? "left" : "event";
-        const row = el("div", `tcp-sim__row tcp-sim__row--${kind}`);
-        if (step.lost) row.classList.add("is-lost");
-        if (i === pos - 1) row.classList.add("is-current");
-        const label = (lang === "id" && step.label_id) || step.label;
-        row.append(el("span", "tcp-sim__label", step.lost ? `${label} ✕ ${t.lost}` : label));
-        if (kind !== "event") row.append(el("span", "tcp-sim__line"));
-        ladder.append(row);
+      left.title.textContent = sc.left[lang];
+      right.title.textContent = sc.right[lang];
+      net.replaceChildren();
+      const devs = {};
+      sc.devices.forEach((d) => {
+        net.append(el("div", "osi-sim__wire"));
+        const box = el("div", "osi-sim__dev", t.devices[d]);
+        box.append(el("small", null, d === "switch" ? "L1-L2" : "L1-L3"));
+        devs[d] = box;
+        net.append(box);
       });
-      setState(clientState, c);
-      setState(serverState, s);
-      note.textContent = pos === 0 ? sc.intro[lang] : sc.steps[pos - 1][lang];
-      dump.textContent = lines.length ? lines.join("\n") : t.empty;
-      dump.scrollTop = dump.scrollHeight;
+      net.append(el("div", "osi-sim__wire"));
+
+      [left, right].forEach((s) => Object.values(s.rows).forEach((r) => r.classList.remove("is-active", "is-done")));
+      const step = pos > 0 ? sc.steps[pos - 1] : null;
+      packet.replaceChildren();
+      if (!step) {
+        where.textContent = "";
+        note.textContent = sc.intro[lang];
+        linux.textContent = t.start;
+      } else {
+        if (step.at === "L" || step.at === "R") {
+          const side = step.at === "L" ? left : right;
+          side.rows[step.l].classList.add("is-active");
+          const dir = step.dir || (step.at === "L" ? "down" : "up");
+          for (let l = 1; l <= 7; l += 1) {
+            if ((dir === "down" && l > step.l && l <= (sc.top || 7)) || (dir === "up" && l < step.l)) side.rows[l].classList.add("is-done");
+          }
+          where.textContent = `${sc[step.at === "L" ? "left" : "right"][lang]} · L${step.l} ${LAYERS[step.l]} · ${t[dir]}`;
+        } else {
+          devs[step.at].classList.add("is-active");
+          where.textContent = `${t.devices[step.at]} · L${step.l} ${LAYERS[step.l]} · ${t.transit}`;
+        }
+        step.pkt.forEach((chip, i) => {
+          const node = el("span", "osi-sim__chip");
+          node.dataset.l = String(chip.l);
+          node.append(el("i", null, `L${chip.l}`), document.createTextNode(typeof chip.t === "string" ? chip.t : chip.t[lang]));
+          if (step.read && step.read.includes(i)) node.classList.add("is-read");
+          packet.append(node);
+        });
+        note.textContent = step[lang];
+        linux.replaceChildren(el("b", null, `${t.linux} `), document.createTextNode(step.lx[lang]));
+      }
+      Object.values(devs).forEach((d) => d.classList.toggle("is-active", !!step && devs[step.at] === d));
       count.textContent = `${t.step} ${pos} / ${sc.steps.length}`;
       back.disabled = pos === 0;
       next.disabled = pos === sc.steps.length;
@@ -1452,8 +1274,9 @@ Jangan menyalin daftar tuning dari blog. Sebagian besar nilai bawaan sudah tepat
     };
 
     const advance = () => {
-      if (pos < SCENARIOS[select.value].steps.length) pos += 1;
-      if (pos === SCENARIOS[select.value].steps.length) stop();
+      const total = SCENARIOS[select.value].steps.length;
+      if (pos < total) pos += 1;
+      if (pos === total) stop();
       render();
     };
 
@@ -1465,7 +1288,7 @@ Jangan menyalin daftar tuning dari blog. Sebagian besar nilai bawaan sudah tepat
       if (timer) return stop();
       play.textContent = t.pause;
       advance();
-      timer = setInterval(advance, 1600);
+      timer = setInterval(advance, 2200);
     });
 
     render();
